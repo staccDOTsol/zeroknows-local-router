@@ -17,5 +17,9 @@ test('Windows launcher works with PATH Node and bundled Node in a spaced home', 
   mkdirSync(bundled,{recursive:true});copyFileSync(process.execPath,join(bundled,'node.exe'));
   env.PATH=process.env.SystemRoot+'\\System32';
   result=run();assert.equal(result.status,0,result.stderr||result.stdout);assert.match(result.stdout,/Read-only plan/);
- } finally {rmSync(root,{recursive:true,force:true});}
+ } finally {
+  // Windows can briefly retain an executed image/AV handle after process exit.
+  // Retry cleanup of this test-owned fixture only; do not suppress final errors.
+  rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+ }
 });
