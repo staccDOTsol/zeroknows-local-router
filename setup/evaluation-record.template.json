@@ -1,0 +1,15 @@
+{
+  "kind": "measured",
+  "task": "coding",
+  "suite": "REPLACE-WITH-ACTUAL-SUITE",
+  "suiteVersion": "REPLACE-WITH-ACTUAL-VERSION",
+  "metric": "pass_rate",
+  "score": null,
+  "samples": null,
+  "contextTokens": null,
+  "recordedAt": null,
+  "runtimeId": "REPLACE-WITH-TESTED-RUNTIME",
+  "modelFingerprint": "REPLACE-WITH-COMPUTED-FINGERPRINT",
+  "harnessVersion": "REPLACE-WITH-USED-HARNESS-VERSION",
+  "evidence": "REPLACE-WITH-ACTUAL-RESULT-ARTIFACT"
+}
