@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {GatewayError,localURL} from './gateway-runtime.mjs';
+import {validateRoutingPolicy,eligibility,compatibilityReasons,memoryEstimate,scoreCandidates} from './routing-policy.mjs';
 const GiB=1024**3;
 const root=fileURLToPath(new URL('.',import.meta.url));
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -14,22 +15,26 @@ async function bounded(promise,signal,ms){
 
 // Deterministic task routing, not a quality classifier or a refusal detector.
 export function classify(body,path){
- let bytes=0,images=0,unsupported=false,text='';
+ let bytes=0,images=0,unsupported=false,tools=false,text='';
  function walk(value,key=''){
-  if(value===null||value===undefined)return;
-  if(Array.isArray(value)){for(const part of value)walk(part,key);return;}
+  if(value===undefined)return;
+  if(value===null){bytes+=4;return;}
+  if(Array.isArray(value)){bytes+=value.length+2;for(const part of value)walk(part,key);return;}
   if(typeof value==='object'){
    if(/audio|video|file/.test(value.type||''))unsupported=true;
+   if(['function_call','function_call_output','custom_tool_call','custom_tool_call_output','tool_use','tool_result'].includes(value.type)||['tool','function'].includes(value.role)||value.tool_calls||value.function_call)tools=true;
    if(['input_image','image_url'].includes(value.type)){
     images++;const url=typeof value.image_url==='string'?value.image_url:value.image_url?.url;
     if(!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(url||''))throw new GatewayError(400,'Images must be local PNG/JPEG/WebP data URLs; remote URLs and file references are unsupported');
     return;
    }
-   for(const [k,v] of Object.entries(value))walk(v,k);return;
+   // Include schema keys, punctuation and non-string primitives, not just text.
+   bytes+=2;for(const [k,v] of Object.entries(value)){bytes+=Buffer.byteLength(JSON.stringify(k))+2;walk(v,k);}return;
   }
-  if(typeof value==='string'){bytes+=Buffer.byteLength(value);if(['text','content','input'].includes(key))text+=' '+value;}
+  if(typeof value==='string'){bytes+=Buffer.byteLength(JSON.stringify(value));if(['text','content','input'].includes(key))text+=' '+value;}
+  else bytes+=String(value).length;
  }
- walk(body.input??body.messages??'', 'input');walk(body.instructions,'text');walk(body.tools);
+ walk(body.input??body.messages??'', 'input');walk(body.instructions,'text');walk(body.tools);walk(body.tool_choice);walk(body.response_format);walk(body.text?.format);
  if(unsupported)throw new GatewayError(415,'Audio, video and file inputs are not supported by these local backends');
  if(images>4)throw new GatewayError(413,'At most four images per request');
  const output=body.max_output_tokens??body.max_completion_tokens??body.max_tokens??2048;
@@ -38,13 +43,15 @@ export function classify(body,path){
  if(embedding&&(!(typeof body.input==='string'||Array.isArray(body.input)&&body.input.every(x=>typeof x==='string'))||body.encoding_format&&body.encoding_format!=='float'))throw new GatewayError(400,'Embeddings require text input and float output encoding');
  if(embedding&&images)throw new GatewayError(415,'This embedding model accepts text only');
  // One UTF-8 byte per token plus framing is deliberately conservative. No input is trimmed.
- const tokens=bytes+512+images*16384+(embedding?0:output);
+ const inputTokens=bytes+512+images*16384,outputTokens=embedding?0:output,tokens=inputTokens+outputTokens;
  const task=embedding?'embedding':images?'vision':/```|\b(code|coding|debug|function|typescript|python|javascript|compile|repository|refactor|sql)\b/i.test(text)?'coding':/\b(reason|prove|math|calculate|analyse|analyze|solve)\b/i.test(text)?'reasoning':'general';
- return {task,tokens,images,estimate:'conservative UTF-8 bytes + framing + output + image allowance'};
+ const format=body.response_format?.type??body.text?.format?.type;
+ const requirements=[embedding?'embedding':'text',...(images?['vision']:[]),...(tools||body.tools?.length?['tools']:[]),...(['json_object','json_schema'].includes(format)?['json']:[])];
+ return {task,tokens,inputTokens,outputTokens,images,requirements,estimate:'conservative serialized UTF-8 bytes + framing + output + image allowance'};
 }
 
 export function readRegistry(path){
- const registry=JSON.parse(readFileSync(path,'utf8'));
+ const registry=JSON.parse(readFileSync(path,'utf8').replace(/^\uFEFF/,''));
  if(registry.memoryMode!=='uma'||typeof registry.serverPath!=='string'||!Number.isInteger(registry.idleEvictMs)||registry.idleEvictMs<60000)throw Error('Configure a UMA runtime and an idle eviction interval of at least 60 seconds');
  if(!Array.isArray(registry.models)||!registry.models.length||registry.models.length>32)throw Error('Configure 1..32 local models');
  const ids=new Set(),ports=new Set();
@@ -64,6 +71,7 @@ export function readRegistry(path){
   if(!Array.isArray(m.ports)||m.ports.length<1||m.ports.length>2)throw Error('One or two bounded instance ports required');
   for(const p of m.ports){if(!Number.isInteger(p)||p<1024||p>65535||ports.has(p))throw Error('Invalid/duplicate instance port');ports.add(p);}
  }
+ validateRoutingPolicy(registry);
  return registry;
 }
 
@@ -108,24 +116,28 @@ export class ModelPool{
  candidates(body,path,exclude=[]){
   const info=classify(body,path),explicit=body.model!=='auto';
   if(typeof body.model!=='string')throw new GatewayError(400,'An explicit model id or model="auto" is required');
-  let candidates=this.registry.models.filter(m=>(!explicit||m.id===body.model)&&!exclude.includes(m.id)&&m.tasks.includes(info.task)&&m.context>=info.tokens);
+  const considered=this.registry.models.filter(m=>(!explicit||m.id===body.model)&&!exclude.includes(m.id));
+  const rejected=[];
+  let candidates=considered.filter(m=>{const reasons=eligibility(m,info,this.registry,{automatic:!explicit,now:this.now()});if(reasons.length)rejected.push({id:m.id,reasons});return !reasons.length;});
   if(info.task==='embedding'){
    if(!explicit){const selected=this.registry.embeddingModel||(candidates.length===1?candidates[0].id:null);candidates=candidates.filter(m=>m.id===selected);}
    if(body.embedding_identity)candidates=candidates.filter(m=>m.embeddingIdentity===body.embedding_identity);
   }
-  if(!candidates.length)throw new GatewayError(explicit?422:503,`No compatible local model for ${info.task}, estimated ${info.tokens} context tokens; input was not truncated`);
+  if(!candidates.length)throw new GatewayError(explicit?422:503,`No compatible local model for ${info.task}, estimated ${info.tokens} context tokens; input was not truncated${rejected.length?'; '+rejected.map(m=>m.id+': '+m.reasons.join(', ')).join('; '):''}`);
   candidates.sort((a,b)=>(a.rank?.[info.task]??99)-(b.rank?.[info.task]??99));
-  return {candidates,info,explicit};
+  return {candidates,info,explicit,rejected};
  }
- required(m,slots=1){return m.weightBytes+m.kvBytesPerToken*m.context*slots+(m.fixedCacheMiB||0)*1024**2+(m.promptCacheGiB??1)*GiB+8*GiB+16*GiB;}
- usable(m){return this.draining.has(m.id)?[]:this.instances.filter(i=>i.model===m.id&&i.ready);}
+ required(m,slots=1){return memoryEstimate(m,{tokens:m.context},slots).coldRequiredBytes;}
+ async explain(body,path){await this.refresh();const {candidates,info,explicit,rejected}=this.candidates(body,path);return {mode:explicit?'explicit':'auto',task:info.task,estimated_tokens:info.tokens,requirements:info.requirements,rejected,candidates:scoreCandidates(this,candidates,info).map(row=>row.explanation)};}
+ usable(m,requiredContext=0){return this.draining.has(m.id)?[]:this.instances.filter(i=>i.model===m.id&&i.ready&&(i.context??m.context)>=requiredContext);}
  active(i){return this.leases.get(i.key)||0;}
-  async status(){await this.refresh();return {version:1,free_ram_gib:this.freeBytes/GiB,headroom_gib:16,loading:this.loading,queued:this.waiters,instances:this.instances.map(i=>({...i,active:this.active(i),last_used:this.lastUsed.get(i.key)||null})),models:this.registry.models.map(m=>({id:m.id,context:m.context,native_context:m.nativeContext,tasks:m.tasks,embedding_identity:m.embeddingIdentity,embedding_dimensions:m.embeddingDimensions,ready:!!this.inventory.find(x=>x.id===m.id)?.ready,required_gib:this.required(m)/GiB})),events:this.events};}
- async ensure(m,automatic,replicate=false,signal){
+  async status(){await this.refresh();return {version:2,routing_policy_version:this.registry.routingPolicy?.version??1,free_ram_gib:this.freeBytes/GiB,headroom_gib:16,loading:this.loading,queued:this.waiters,instances:this.instances.map(i=>({...i,active:this.active(i),last_used:this.lastUsed.get(i.key)||null})),models:this.registry.models.map(m=>({id:m.id,context:m.context,native_context:m.nativeContext,tasks:m.tasks,embedding_identity:m.embeddingIdentity,embedding_dimensions:m.embeddingDimensions,ready:!!this.inventory.find(x=>x.id===m.id)?.ready,compatibility:m.routing?.compatibility?.status||'legacy_operator_configured',automatic_routing:!compatibilityReasons(m,this.registry,{automatic:true}).length,routing_blockers:compatibilityReasons(m,this.registry),quality:m.routing?.evaluations?.length?'recorded_requires_task_match':'unverified',required_gib:this.required(m)/GiB})),events:this.events};}
+ async ensure(m,automatic,replicate=false,signal,requiredContext=0){
   return this.exclusive(async()=>{
+   const blockers=compatibilityReasons(m,this.registry);if(blockers.length)throw new GatewayError(422,`${m.id}: ${blockers.join(', ')}`);
    if(signal?.aborted)throw signal.reason;
    await this.refresh(true);
-   const instances=this.usable(m);
+   const instances=this.usable(m,requiredContext);
    if(!replicate&&instances.length)return instances[0];
    if(instances.some(i=>this.active(i)<i.slots))return instances.find(i=>this.active(i)<i.slots);
    const used=new Set(this.instances.filter(i=>i.model===m.id).map(i=>i.replica));
@@ -149,26 +161,28 @@ export class ModelPool{
   });
  }
  async acquire(body,path,signal,exclude=[]){
-  const {candidates,info,explicit}=this.candidates(body,path,exclude);
+  const {candidates,info,explicit,rejected}=this.candidates(body,path,exclude);
   if(this.waiters>=this.maxQueued)throw new GatewayError(429,'Local model admission queue is full');
   this.waiters++;for(const m of candidates)this.pending.set(m.id,(this.pending.get(m.id)||0)+1);
   const until=this.now()+this.queueMs;let last='No eligible instance has free capacity';
   try{
    while(this.now()<until){
     if(signal?.aborted)throw signal.reason;await bounded(this.refresh(),signal,until-this.now());
-    for(const m of candidates){
-     const instance=this.usable(m).find(i=>this.active(i)<i.slots);
+    if(signal?.aborted)throw signal.reason;
+    const ranked=scoreCandidates(this,candidates,info);
+    for(const {model:m,explanation} of ranked){
+     const instance=this.usable(m).find(i=>this.active(i)<i.slots&&(i.context??m.context)>=info.tokens);
      if(instance&&this.freeBytes>=16*GiB){
       this.leases.set(instance.key,this.active(instance)+1);this.lastUsed.set(instance.key,this.now());let released=false;
-      this.event('route',{model:m.id,instance:instance.key,task:info.task,mode:explicit?'explicit':'auto'});
-      return {model:m.id,instance,embeddingIdentity:m.embeddingIdentity,embeddingDimensions:m.embeddingDimensions,backend:{url:localURL(`http://127.0.0.1:${instance.port}`),protocol:'responses'},info,release:()=>{if(!released){released=true;this.leases.set(instance.key,Math.max(0,this.active(instance)-1));this.lastUsed.set(instance.key,this.now());}}};
+      this.event('route',{model:m.id,instance:instance.key,task:info.task,mode:explicit?'explicit':'auto',selection:explanation,alternatives:ranked.filter(row=>row.model.id!==m.id).map(row=>row.explanation),rejected});
+      return {model:m.id,instance,selection:explanation,embeddingIdentity:m.embeddingIdentity,embeddingDimensions:m.embeddingDimensions,backend:{url:localURL(`http://127.0.0.1:${instance.port}`),protocol:'responses'},info,release:()=>{if(!released){released=true;this.leases.set(instance.key,Math.max(0,this.active(instance)-1));this.lastUsed.set(instance.key,this.now());}}};
      }
     }
     // Existing slots are always considered before another copy of any weights.
-    for(const m of candidates){
-     const existing=this.usable(m);const queued=this.pending.get(m.id)||0;
+    for(const {model:m} of ranked){
+     const existing=this.usable(m,info.tokens);const queued=this.pending.get(m.id)||0;
      if(existing.length&&queued<2)continue;
-     try{const result=await bounded(this.ensure(m,true,existing.length>0,signal),signal,until-this.now());if(result)break;}catch(error){last=error.message;if(signal?.aborted)throw signal.reason;if(explicit&&error.status!==507)throw error;}
+     try{const result=await bounded(this.ensure(m,true,existing.length>0,signal,info.tokens),signal,until-this.now());if(result)break;}catch(error){last=error.message;if(signal?.aborted)throw signal.reason;if(explicit&&error.status!==507)throw error;}
      if(signal?.aborted)throw signal.reason;
     }
     await delay(this.pollMs);

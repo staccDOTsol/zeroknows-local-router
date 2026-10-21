@@ -6,14 +6,14 @@ import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {freemem} from 'node:os';
 import {adaptRequest} from './tool-adapter.mjs';
-import {GatewayError,Limiter,localURL,readJSON,sseFrames,frameData} from './gateway-runtime.mjs';
+import {GatewayError,Limiter,localURL,readJSON,sseFrames,frameData,SSEChannel,superviseSSE} from './gateway-runtime.mjs';
 import {toChat,fromChat,chatEvents} from './actual-adapter.mjs';
 import {ModelPool,WindowsController,readRegistry} from './model-router.mjs';
 import {SessionMemory,memoryConfiguration,memoryAccess,sessionHeader,withSessionEvidence,assertMemoryPromptBudget} from './session-memory.mjs';
 import {buildCodexCatalog,readCatalogTemplate} from './model-catalog.mjs';
 
 const root=fileURLToPath(new URL('.',import.meta.url));
-const defaults={port:8090,requestMs:600000,queueMs:120000,maxQueued:8,minFreeMemoryGiB:16,chat:{url:'http://127.0.0.1:8080',protocol:'responses',maxActive:1},embedding:{url:'http://127.0.0.1:8081',protocol:'responses',maxActive:2},actual:null};
+const defaults={port:8090,requestMs:600000,queueMs:120000,maxQueued:8,minFreeMemoryGiB:16,heartbeatMs:15000,streamIdleMs:120000,routeHeaderTimeoutMs:120000,chat:{url:'http://127.0.0.1:8080',protocol:'responses',maxActive:1},embedding:{url:'http://127.0.0.1:8081',protocol:'responses',maxActive:2},actual:null};
 export function configuration(file){
  const config={...structuredClone(defaults),...(file?JSON.parse(readFileSync(file,'utf8')):{})};
  for(const key of ['chat','embedding','actual'])if(config[key]){
@@ -24,7 +24,7 @@ export function configuration(file){
  }
  if(config.actual&&(!Array.isArray(config.actual.models)||!config.actual.models.length))throw new Error('Actual backend requires explicit model aliases');
  if(config.registry){const registryPath=fileURLToPath(new URL(config.registry,new URL('.',import.meta.url)));config.pool=new ModelPool(readRegistry(registryPath),new WindowsController(registryPath,config.powershell||'pwsh'),config);}
- for(const [key,min,max] of [['port',1024,65535],['requestMs',100,1800000],['queueMs',10,300000],['maxQueued',0,32],['minFreeMemoryGiB',0,64]])if(!Number.isInteger(config[key])||config[key]<min||config[key]>max)throw new Error(`Invalid ${key}`);
+ for(const [key,min,max] of [['port',1024,65535],['requestMs',100,1800000],['queueMs',10,300000],['maxQueued',0,32],['minFreeMemoryGiB',0,64],['heartbeatMs',10,60000],['streamIdleMs',100,1800000],['routeHeaderTimeoutMs',10,600000]])if(!Number.isInteger(config[key])||config[key]<min||config[key]>max)throw new Error(`Invalid ${key}`);
  config.sessionMemory=memoryConfiguration(config.sessionMemory);
  return config;
 }
@@ -65,7 +65,7 @@ export function createGateway(config=configuration(),{log=true,captureTools=fals
 const port=config.port;
 const memory=config.sessionMemory?new SessionMemory(config.sessionMemory):null;
 const server=http.createServer(async(req,res)=>{
- const started=Date.now(),requestId=randomUUID(),abort=new AbortController();let status=500,model=null,upstream=null,release=null,queueMs=0,outcome='complete',memoryAttached=false;
+ const started=Date.now(),requestId=randomUUID(),abort=new AbortController();let status=500,model=null,upstream=null,release=null,queueMs=0,outcome='complete',memoryAttached=false,channel=null;
  res.setHeader('x-request-id',requestId);
  const deadline=setTimeout(()=>abort.abort(new GatewayError(504,'Local request deadline exceeded')),config.requestMs);
  abort.signal.addEventListener('abort',()=>{if(!req.complete)req.destroy();},{once:true});
@@ -144,24 +144,27 @@ const server=http.createServer(async(req,res)=>{
     try{adapter=adaptRequest(body);body=adapter.body;}catch(error){return fail(res,status=400,error.message);}
    }
    if(memoryAttached)assertMemoryPromptBudget(body,memory);
+   if(body.stream===true&&['/v1/responses','/v1/chat/completions'].includes(path))channel=new SSEChannel(res,{signal:abort.signal,heartbeatMs:config.heartbeatMs,requestId,protocol:path==='/v1/responses'?'responses':'chat',onError:error=>abort.abort(error)});
    if(!config.pool){
    backend=path==='/v1/embeddings'?config.embedding:config.actual?.models.includes(model)?config.actual:config.chat;
    upstream=backend.url;
    const queued=Date.now();release=await backend.limiter.acquire(abort.signal);queueMs=Date.now()-queued;
-   if(freemem()<config.minFreeMemoryGiB*1024**3)return fail(res,status=503,`Insufficient free physical memory: preserve ${config.minFreeMemoryGiB} GiB Windows headroom`);
+   if(freemem()<config.minFreeMemoryGiB*1024**3)throw new GatewayError(503,`Insufficient free physical memory: preserve ${config.minFreeMemoryGiB} GiB Windows headroom`);
    const list=await fetch(upstream+'/v1/models',{redirect:'error',signal:AbortSignal.any([abort.signal,AbortSignal.timeout(10000)])});
-   if(!list.ok)return fail(res,status=503,'Local model is not ready');
+   if(!list.ok)throw new GatewayError(503,'Local model is not ready');
    const ids=(await readJSON(list,1024*1024)).data.map(m=>m.id);
-   if(!ids.includes(model))return fail(res,status=409,`Requested model is not loaded. Active: ${ids.join(', ')}. Use start-model.ps1 to switch explicitly.`);
+   if(!ids.includes(model))throw new GatewayError(409,`Requested model is not loaded. Active: ${ids.join(', ')}. Use start-model.ps1 to switch explicitly.`);
    }
   }else upstream=config.chat.url;
   let upstreamPath=path,upstreamBody=body;
   if(adapter&&backend.protocol==='chat'){upstreamPath='/v1/chat/completions';upstreamBody=toChat(body,backend.capabilities);}
   if(memoryAttached)assertMemoryPromptBudget(upstreamBody,memory);
   // Deliberately do not forward Authorization, cookies, or user credentials.
-  let reply;
+  let reply,routeHeaders;
   if(config.pool&&body){
-   const routingBody=memoryAttached?structuredClone(body):originalBody;
+   // Admission must account for the actual expanded tool schemas/replay that
+   // will be forwarded, not the smaller pre-adaptation client representation.
+   const routingBody=structuredClone(body);
    const requestedModel=model,excluded=[],routeErrors=[];const attempts=requestedModel==='auto'?2:1;
    for(let attempt=0;attempt<attempts;attempt++){
     const queued=Date.now();const lease=await config.pool.acquire({...routingBody,model:requestedModel},path,abort.signal,excluded);queueMs+=Date.now()-queued;
@@ -170,8 +173,9 @@ const server=http.createServer(async(req,res)=>{
     if(path==='/v1/responses'){adapter=adaptRequest({...originalBody,model});body=adapter.body;}
     if(['qwen-abliterated','nemotron-super-vl-q4'].includes(model)&&body.reasoning?.effort==='none')body.chat_template_kwargs={...body.chat_template_kwargs,enable_thinking:false};
     if(memoryAttached)assertMemoryPromptBudget(body,memory);
-    res.setHeader('x-local-model',model);res.setHeader('x-local-instance',lease.instance.key);res.setHeader('x-local-route',lease.info.task);res.setHeader('x-local-attempts',String(attempt+1));
-    if(routeErrors.length)res.setHeader('x-local-failover',routeErrors.join(','));
+    // Do not publish a tentative model before a possible pre-output failover.
+    routeHeaders={'x-local-model':model,'x-local-instance':lease.instance.key,'x-local-route':lease.info.task,'x-local-attempts':String(attempt+1)};
+    if(routeErrors.length)routeHeaders['x-local-failover']=routeErrors.join(',');
     const attemptAbort=new AbortController();const attemptTimer=setTimeout(()=>attemptAbort.abort(new GatewayError(504,'Backend did not return response headers before the route timeout')),config.routeHeaderTimeoutMs??120000);
     try{
      reply=await fetch(upstream+path,{redirect:'error',method:req.method,headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.any([abort.signal,attemptAbort.signal])});
@@ -192,11 +196,18 @@ const server=http.createServer(async(req,res)=>{
      excluded.push(model);routeErrors.push(`${model}:connection_or_timeout`);release();release=null;
     }finally{clearTimeout(attemptTimer);}
    }
-  }else reply=await fetch(upstream+upstreamPath,{redirect:'error',method:req.method,headers:{'content-type':'application/json'},body:upstreamBody?JSON.stringify(upstreamBody):undefined,signal:abort.signal});
+  }else {
+   const headerAbort=new AbortController(),headerTimer=setTimeout(()=>headerAbort.abort(new GatewayError(504,'Backend did not return response headers before the route timeout')),config.routeHeaderTimeoutMs??120000);
+   try{reply=await fetch(upstream+upstreamPath,{redirect:'error',method:req.method,headers:{'content-type':'application/json'},body:upstreamBody?JSON.stringify(upstreamBody):undefined,signal:AbortSignal.any([abort.signal,headerAbort.signal])});}
+   finally{clearTimeout(headerTimer);}
+  }
+  if(routeHeaders){if(channel)channel.headers(routeHeaders);else for(const [key,value] of Object.entries(routeHeaders))res.setHeader(key,value);}
   status=reply.status;
   if(status>=400){
    const errorText=JSON.stringify(await readJSON(reply,1024*1024));
    if(status===500&&/Jinja Exception|System message must be at the beginning|context size|exceeds.*context|Failed to parse tool call arguments as JSON/i.test(errorText))status=400;
+   if(channel?.committed)throw new GatewayError(status,JSON.parse(errorText)?.error?.message||`Local upstream returned HTTP ${status}`);
+   channel?.stop();
    res.writeHead(status,{'content-type':reply.headers.get('content-type')||'application/json'});res.end(errorText);return;
   }
   if(embeddingMetadata&&status===200){
@@ -205,6 +216,16 @@ const server=http.createServer(async(req,res)=>{
    return json(res,status,{...value,...embeddingMetadata});
   }
   if(adapter&&status===200&&!body.stream){const value=await readJSON(reply);return json(res,status,backend.protocol==='chat'?fromChat(value,body,adapter):adapter.response(value));}
+  if(channel&&status===200&&reply.headers.get('content-type')?.includes('text/event-stream')){
+   let source=superviseSSE(reply.body,{idleMs:config.streamIdleMs,protocol:adapter?backend.protocol:path==='/v1/responses'?'responses':'chat',onTimeout:error=>abort.abort(error)});
+   if(adapter){if(backend.protocol==='chat')source=chatEvents(source,body);source=normalizeResponses(source,adapter);}
+   // Unlike pipeline(), a source error must not destroy the destination before
+   // a terminal error can be delivered. Each write still awaits backpressure.
+   for await(const chunk of source)await channel.write(chunk);
+   channel.end();return;
+  }
+  if(channel?.committed)throw new GatewayError(502,'Backend did not provide the requested SSE stream');
+  channel?.stop();
   res.writeHead(status,{'content-type':reply.headers.get('content-type')||'application/json','cache-control':'no-store','x-accel-buffering':'no'});
   if(reply.body){
    let source=reply.body;
@@ -214,9 +235,9 @@ const server=http.createServer(async(req,res)=>{
   }else res.end();
  }catch(error){
   const reason=error?.memoryWriteUncertain?error:abort.signal.aborted?abort.signal.reason:error;status=reason?.status||502;outcome=status===499?'client_disconnected':status===504?'timeout':'error';
-  if(!res.headersSent&&!res.destroyed)fail(res,status,'Local upstream unavailable: '+reason.message);else res.destroy();
+  if(!res.headersSent&&!res.destroyed)fail(res,status,'Local upstream unavailable: '+reason.message);else if(channel)channel.fail(reason);else res.destroy();
  }finally{
-  clearTimeout(deadline);abort.abort();release?.();res.removeListener('close',disconnected);req.removeListener('aborted',disconnected);
+  channel?.stop();clearTimeout(deadline);abort.abort();release?.();res.removeListener('close',disconnected);req.removeListener('aborted',disconnected);
   if(log)appendFileSync(root+'logs/proxy.jsonl',JSON.stringify({time:new Date().toISOString(),requestId,method:req.method,path,model,upstream,status,outcome,queueMs,ms:Date.now()-started})+'\n');
  }
 });

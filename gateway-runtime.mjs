@@ -44,3 +44,96 @@ export async function* sseFrames(stream,maxFrameBytes=1024*1024){
  buffer+=decoder.decode();if(buffer.trim())yield buffer.replaceAll('\r\n','\n');
 }
 export function frameData(frame){return frame.split('\n').filter(x=>x.startsWith('data:')).map(x=>x.slice(5).trimStart()).join('\n');}
+
+// A delayed first heartbeat preserves ordinary HTTP validation/admission errors.
+// Once the first comment commits HTTP 200, later failures must be SSE errors:
+// status codes and route headers can no longer be changed on that connection.
+export class SSEChannel {
+ constructor(response,{signal,heartbeatMs=15000,requestId,protocol='responses',onError=()=>{}}={}){
+  this.response=response;this.signal=signal;this.requestId=requestId;this.protocol=protocol;
+  this.blocked=null;this.metadata=null;this.nextSequence=0;this.lastWrite=Date.now();
+  this.timer=setInterval(()=>{
+   if(this.blocked||response.destroyed||response.writableEnded||Date.now()-this.lastWrite<heartbeatMs)return;
+   this.write(': local-keepalive\n\n').catch(onError);
+  },heartbeatMs);this.timer.unref?.();
+ }
+ get committed(){return this.response.headersSent;}
+ open(){
+  if(!this.committed)this.response.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-store','x-accel-buffering':'no','x-local-route-metadata':this.metadata?'sse-comment':'headers-or-sse-comment'});
+ }
+ headers(headers){
+  if(!this.committed){for(const [key,value] of Object.entries(headers))this.response.setHeader(key,value);}
+  else this.metadata={...this.metadata,...headers};
+ }
+ async write(chunk){
+  if(this.blocked)await this.blocked;
+  if(this.signal?.aborted)throw this.signal.reason;
+  if(this.response.destroyed||this.response.writableEnded)throw new GatewayError(499,'Client disconnected');
+  this.open();
+  if(this.metadata){const metadata=this.metadata;this.metadata=null;await this.raw(': local-route '+JSON.stringify(metadata)+'\n\n');}
+  const data=frameData(String(chunk));
+  try{const value=JSON.parse(data);if(Number.isInteger(value.sequence_number))this.nextSequence=Math.max(this.nextSequence,value.sequence_number+1);}catch{}
+  await this.raw(chunk);
+ }
+ async raw(chunk){
+  this.lastWrite=Date.now();
+  if(this.response.write(chunk))return;
+  this.blocked=new Promise((resolve,reject)=>{
+   const clean=()=>{this.response.off('drain',drain);this.response.off('close',close);this.response.off('error',error);this.signal?.removeEventListener('abort',cancel);};
+   const drain=()=>{clean();resolve();},close=()=>{clean();reject(new GatewayError(499,'Client disconnected'));},error=err=>{clean();reject(err);},cancel=()=>{clean();reject(this.signal.reason);};
+   this.response.once('drain',drain);this.response.once('close',close);this.response.once('error',error);this.signal?.addEventListener('abort',cancel,{once:true});
+   if(this.signal?.aborted)cancel();
+  });
+  try{await this.blocked;}finally{this.blocked=null;}
+ }
+ stop(){clearInterval(this.timer);}
+ end(){this.stop();this.response.end();}
+ fail(error){
+  this.stop();
+  if(this.response.destroyed||this.response.writableEnded)return;
+  // Never queue an error behind an unbounded slow consumer. The request deadline
+  // also bounds backpressure; cancellation must release its backend lease.
+  if(this.blocked||this.response.writableNeedDrain||error.status===499){this.response.destroy();return;}
+  const detail={code:error.status===504?'local_upstream_timeout':'local_upstream_error',message:error.message,type:'server_error'};
+  const value=this.protocol==='responses'?{type:'error',code:detail.code,message:detail.message,param:null,sequence_number:this.nextSequence,request_id:this.requestId,status:error.status||502}:{error:{...detail,request_id:this.requestId,status:error.status||502}};
+  this.response.end((this.protocol==='responses'?'event: error\n':'')+'data: '+JSON.stringify(value)+'\n\n');
+ }
+}
+
+// Only upstream data progresses this clock; downstream keepalives and upstream
+// SSE comments/pings cannot keep a stuck model alive. The outer request deadline
+// remains absolute even when the upstream emits real progress indefinitely.
+export async function* superviseSSE(stream,{idleMs=120000,protocol='responses',onTimeout=()=>{}}={}){
+ let timer,terminal=false,remaining=idleMs,waitingAt;
+ const wait=()=>{waitingAt=Date.now();timer=setTimeout(()=>onTimeout(new GatewayError(504,'Local upstream made no streaming progress before the idle deadline')),Math.max(1,remaining));timer.unref?.();};
+ wait();
+ try{
+  for await(const frame of sseFrames(stream)){
+   clearTimeout(timer);remaining-=Date.now()-waitingAt;
+   const raw=frameData(frame),eventName=frame.split('\n').find(line=>line.startsWith('event:'))?.slice(6).trim();let value;
+   if(protocol==='responses'&&raw==='[DONE]')throw new GatewayError(502,'Backend stream ended before a terminal event; partial output was not retried');
+   let keepalive=['ping','heartbeat','keepalive'].includes(eventName);
+   if(raw&&raw!=='[DONE]'&&!keepalive){
+    try{value=JSON.parse(raw);}catch{throw new GatewayError(502,'Backend returned invalid SSE JSON');}
+    const idleEvents=['ping','heartbeat','keepalive','response.queued','response.in_progress','response.created'];
+    keepalive=['ping','heartbeat','keepalive'].includes(value?.type);
+    const nonempty=value=>typeof value==='string'&&value.length>0;
+    const progress=protocol==='responses'
+     ? nonempty(value?.delta)||['response.output_item.added','response.output_item.done','response.content_part.added','response.content_part.done','response.completed','response.incomplete','response.failed','error'].includes(value?.type)
+     : value?.choices?.some(choice=>nonempty(choice.finish_reason)||['content','reasoning_content','reasoning','refusal'].some(key=>nonempty(choice.delta?.[key]))||choice.delta?.tool_calls?.some(call=>nonempty(call.id)||nonempty(call.function?.name)||nonempty(call.function?.arguments)));
+    if(progress&&!idleEvents.includes(value?.type)&&!idleEvents.includes(eventName))remaining=idleMs;
+    if(protocol==='responses'&&value?.error&&!['response.failed','error'].includes(value.type))throw new GatewayError(502,value.error.message||'Backend stream error');
+   }
+   if(protocol==='responses')terminal=['response.completed','response.incomplete','response.failed','error'].includes(value?.type);
+   else terminal=raw==='[DONE]'||terminal||!!value?.choices?.some(choice=>choice.finish_reason)||!!value?.error;
+   // Transport pings are comments, not fake Responses events (with undefined
+   // type/sequence) that a strict client could mistake for malformed output.
+   yield keepalive?': upstream-keepalive\n\n':frame+'\n\n';
+   if(protocol==='responses'&&terminal||protocol==='chat'&&(raw==='[DONE]'||value?.error))return;
+   // Time spent waiting for a downstream drain is not upstream idleness. It is
+   // still bounded by the absolute request deadline in the gateway.
+   wait();
+  }
+  if(!terminal)throw new GatewayError(502,'Backend stream ended before a terminal event; partial output was not retried');
+ }finally{clearTimeout(timer);}
+}
