@@ -59,3 +59,14 @@ test('guards append to the end and leave the prefix untouched (Responses input)'
   assert.deepEqual(out.body.input.slice(0, input.length), input);
   assert.match(out.body.input.at(-1).content[0].text, /^VERIFY WARNING/);
 });
+
+test('edit guard flags a whole-file rewrite of a file already read or written', () => {
+  const messages = [{role: 'user', content: 'fix the build'},
+    call('r', 'read', {filePath: 'src/a.ts'}), result('r', 'export const a = 1'),
+    call('w', 'write', {filePath: 'src/a.ts', content: 'export const a = 2'}), result('w', 'Wrote file successfully.')];
+  assert.match(note({messages}), /^EDIT WARNING.*src\/a\.ts/);
+  const fresh = [{role: 'user', content: 'build'}, call('w', 'write', {filePath: 'src/new.ts', content: 'x'}), result('w', 'Wrote file successfully.')];
+  assert.equal(note({messages: fresh}), null);
+  const edited = [...messages.slice(0, 3), call('e', 'edit', {filePath: 'src/a.ts', oldString: '1', newString: '2'}), result('e', 'Edit applied.')];
+  assert.equal(note({messages: edited}), null);
+});
