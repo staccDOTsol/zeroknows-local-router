@@ -41,6 +41,9 @@ const backend=http.createServer(async(req,res)=>{
 await new Promise(r=>backend.listen(0,'127.0.0.1',r));
 const upstream='http://127.0.0.1:'+backend.address().port;
 const config=configuration();config.port=18090;config.requestMs=1500;config.queueMs=120;config.maxQueued=2;
+// Mock streams allocate no model weights. Test the RAM guard explicitly below,
+// rather than requiring a 16 GiB spare-memory CI runner for unrelated cases.
+config.minFreeMemoryGiB=0;
 config.chat={url:upstream,protocol:'responses',maxActive:1,limiter:new Limiter(1,2,120)};
 config.actual={url:upstream,protocol:'chat',models:['mock-actual'],maxActive:4,limiter:new Limiter(4,2,120),capabilities:{tools:true,vision:true}};
 const gateway=createGateway(config,{log:false});await new Promise(r=>gateway.listen(config.port,'127.0.0.1',r));
