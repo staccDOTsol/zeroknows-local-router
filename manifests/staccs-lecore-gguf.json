@@ -1,0 +1,395 @@
+{
+  "schemaVersion": 1,
+  "publisher": "staccs",
+  "generatedAt": "2026-10-21T06:46:30.034670+00:00",
+  "artifacts": [
+    {
+      "id": "qwen3-32b-lecore-weights",
+      "modelId": "qwen3-32b-lecore",
+      "repository": "staccs/Qwen3-32B-lecore-GGUF",
+      "revision": "94b0cab2c1c7f57fb6865b1c6615c99aa08890d1",
+      "path": "Qwen3-32B-lecore-mix.gguf",
+      "bytes": 13118437344,
+      "sha256": "b21b33cc4feefea5cde57f4f412bb092ed10ad8c750d694268492b81c6acecc5",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "Qwen/Qwen3-32B",
+      "architecture": "qwen3",
+      "declaredContext": 40960,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "qwq-32b-lecore-weights",
+      "modelId": "qwq-32b-lecore",
+      "repository": "staccs/QwQ-32B-lecore-GGUF",
+      "revision": "5200667e5a16aec478f7437767799861b24f7637",
+      "path": "QwQ-32B-lecore-mix.gguf",
+      "bytes": 13107272672,
+      "sha256": "d3215fc26589ec3da5d0adc8bbe9c60a344abd26ebb8eb4f153a88a911e48507",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "Qwen/QwQ-32B",
+      "architecture": "qwen2",
+      "declaredContext": 40960,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "llama-3-3-nemotron-super-49b-v1-5-lecore-weights",
+      "modelId": "llama-3-3-nemotron-super-49b-v1-5-lecore",
+      "repository": "staccs/Llama-3_3-Nemotron-Super-49B-v1_5-lecore-GGUF",
+      "revision": "a18f222b48cfb5da134703fcbe37c1b72c8d76e8",
+      "path": "Llama-3_3-Nemotron-Super-49B-v1_5-lecore-mix.gguf",
+      "bytes": 19724805248,
+      "sha256": "4ed0dcf5a5a1510c3cf66189eeb1d3731ec15603a361f0fca03da47a70d7f550",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "nvidia/Llama-3_3-Nemotron-Super-49B-v1_5",
+      "architecture": "deci",
+      "declaredContext": 131072,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "qwen2.5-72b-instruct-lecore-weights",
+      "modelId": "qwen2.5-72b-instruct-lecore",
+      "repository": "staccs/Qwen2.5-72B-Instruct-lecore-GGUF",
+      "revision": "2b5c9b0179402791145f289c0ddb4535a6d8d039",
+      "path": "Qwen2.5-72B-Instruct-lecore-mix.gguf",
+      "bytes": 30997407264,
+      "sha256": "93c08ff5fd13ebde4ec7897d843bf97e0f4f23deca75463c96dbb9e48c78300c",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "Qwen/Qwen2.5-72B-Instruct",
+      "architecture": "qwen2",
+      "declaredContext": 32768,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "gemma-3-27b-it-lecore-weights",
+      "modelId": "gemma-3-27b-it-lecore",
+      "repository": "staccs/gemma-3-27b-it-lecore-GGUF",
+      "revision": "7583133a8f168e0cd4da0656eecf07363e0b03c7",
+      "path": "gemma-3-27b-it-lecore-mix.gguf",
+      "bytes": 11686008032,
+      "sha256": "4c12d1c3f5aa3e1156ac137e17839a9e29b8571af161e3f9534a5957ae5c9dea",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "google/gemma-3-27b-it",
+      "architecture": "gemma3",
+      "declaredContext": 131072,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "deepseek-r1-distill-llama-70b-lecore-weights",
+      "modelId": "deepseek-r1-distill-llama-70b-lecore",
+      "repository": "staccs/DeepSeek-R1-Distill-Llama-70B-lecore-GGUF",
+      "revision": "1dabe6cd453d3465e8c89a8f93b3c5bbe199eb3a",
+      "path": "DeepSeek-R1-Distill-Llama-70B-lecore-mix.gguf",
+      "bytes": 27194081152,
+      "sha256": "8c417daa839330c54a409133906ea057de3bd808eddf73f68a988dcbb0b65ee3",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+      "architecture": "llama",
+      "declaredContext": 131072,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "llama-3.3-70b-instruct-lecore-weights",
+      "modelId": "llama-3.3-70b-instruct-lecore",
+      "repository": "staccs/Llama-3.3-70B-Instruct-lecore-GGUF",
+      "revision": "7a10601740a288a9bbf8d0460ada034d26336835",
+      "path": "Llama-3.3-70B-Instruct-lecore-mix.gguf",
+      "bytes": 27201030912,
+      "sha256": "b9f773ff7321e03b9e06f60252ea238469a14499bdf471a9b73936cdab12613c",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "meta-llama/Llama-3.3-70B-Instruct",
+      "architecture": "llama",
+      "declaredContext": 131072,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "qwen3-32b-lecore-19g-weights",
+      "modelId": "qwen3-32b-lecore-19g",
+      "repository": "staccs/Qwen3-32B-lecore-19g-GGUF",
+      "revision": "1df0475a4b9b3d82b124354e43dc8bd7b9eee968",
+      "path": "Qwen3-32B-lecore-19g-GGUF-lecore-mix.gguf",
+      "bytes": 18637551584,
+      "sha256": "9fd11c69604071e9572c5184a2548f74644b7ecf6d250970c1f76c2449b3444d",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "Qwen/Qwen3-32B",
+      "architecture": "qwen3",
+      "declaredContext": 40960,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "qwen3.8-27b-lecore-weights",
+      "modelId": "qwen3.8-27b-lecore",
+      "repository": "staccs/Qwen3.8-27B-lecore-GGUF",
+      "revision": "bc0d7474be3eb16ea92bd073b43758e61b76e72c",
+      "path": "Qwen3.8-27B-lecore-mix.gguf",
+      "bytes": 15476869696,
+      "sha256": "845fe022a6721b4927bcb54503a58c4d04abbe41985805ad2db2111280c9784c",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "Qwen/Qwen3.8-27B",
+      "architecture": "qwen35",
+      "declaredContext": 262144,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "muse-glimmer-30b-lecore-weights",
+      "modelId": "muse-glimmer-30b-lecore",
+      "repository": "staccs/Muse-Glimmer-30B-lecore-GGUF",
+      "revision": "e1acf733d30d03403fdc470f9842a8642da24dcb",
+      "path": "Muse-Glimmer-30B-lecore-mix.gguf",
+      "bytes": 15844695616,
+      "sha256": "fed50357b7c685d57e66797f2147ac814b1d79c886882f046a90394b1b3e011c",
+      "format": "gguf",
+      "quantization": "leCore per-tensor K-quant mix",
+      "role": "generation",
+      "selectionReason": "Select the leCore checkpoint, not stock Q4_K_M baseline; exact artifact may differ from its MLX counterpart",
+      "family": "meta-models/Muse-Glimmer-30B",
+      "architecture": "muse-glimmer",
+      "declaredContext": 131072,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    },
+    {
+      "id": "muse-glimmer-30b-lecore-mmproj",
+      "modelId": "muse-glimmer-30b-lecore",
+      "repository": "staccs/Muse-Glimmer-30B-lecore-GGUF",
+      "revision": "e1acf733d30d03403fdc470f9842a8642da24dcb",
+      "path": "Muse-Glimmer-30B-mmproj-f16.gguf",
+      "bytes": 3847367616,
+      "sha256": "2fa02c0bc4b6b5e5c4eba72e5fe6eab0716b9cd84ca6b796af68298f22a6bf13",
+      "format": "gguf",
+      "quantization": "F16 vision projector",
+      "role": "vision-projector",
+      "selectionReason": "Required companion for image capability; image smoke test still required",
+      "family": "meta-models/Muse-Glimmer-30B",
+      "architecture": "muse-glimmer",
+      "declaredContext": 131072,
+      "enabled": false,
+      "validationStatus": "metadata_only_pending_download_hash_and_runtime_smoke_test"
+    }
+  ],
+  "exclusions": [
+    {
+      "repository": "staccs/QwQ-32B-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/Qwen3-32B-lecore-GGUF",
+      "path": "Qwen3-32B-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/Muse-Spark-Open-816B-A42B-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present. Weights alone are 260.29 GB, exceeding 128 GiB RAM before runtime/KV overhead."
+    },
+    {
+      "repository": "staccs/lecore-hrr-gpt2",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/holo-llm-hrr-attention",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/lecore-qwen35-9b-assimilated",
+      "reason": "Full HF-format checkpoint fits storage/memory in isolation, but no GGUF artifact in this repository; candidate needs trusted conversion to GGUF or a separately validated Windows backend before this llama.cpp downloader can deploy it."
+    },
+    {
+      "repository": "staccs/lecore-deepseek-v4-flash-hrr",
+      "reason": "Overlay only: patched shard 1 of 48, not a complete runnable checkpoint; other 47 base shards and external gateway required. Card claims roughly156GB base, not fit as given."
+    },
+    {
+      "repository": "staccs/lecore-303m-rerun",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/lecore-bge-assimilated",
+      "reason": "Full HF-format checkpoint fits storage/memory in isolation, but no GGUF artifact in this repository; candidate needs trusted conversion to GGUF or a separately validated Windows backend before this llama.cpp downloader can deploy it."
+    },
+    {
+      "repository": "staccs/Qwen3.5-0.8B-lecore-assimilated",
+      "reason": "Full HF-format checkpoint fits storage/memory in isolation, but no GGUF artifact in this repository; candidate needs trusted conversion to GGUF or a separately validated Windows backend before this llama.cpp downloader can deploy it."
+    },
+    {
+      "repository": "staccs/Llama-3_3-Nemotron-Super-49B-v1_5-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/Qwen2.5-72B-Instruct-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/Qwen3-32B-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/QwQ-32B-lecore-GGUF",
+      "path": "QwQ-32B-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/Llama-3_3-Nemotron-Super-49B-v1_5-lecore-GGUF",
+      "path": "Llama-3_3-Nemotron-Super-49B-v1_5-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/Qwen2.5-72B-Instruct-lecore-GGUF",
+      "path": "Qwen2.5-72B-Instruct-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/gemma-3-27b-it-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/Qwen3-32B-lecore-hrr",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/Llama-3_3-Nemotron-Super-49B-v1_5-lecore-hrr",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/gemma-3-27b-it-lecore-GGUF",
+      "path": "gemma-3-27b-it-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/DeepSeek-R1-Distill-Llama-70B-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/Apertus-70B-Instruct-2509-lecore-hrr",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/QwQ-32B-lecore-hrr",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/Qwen2.5-72B-Instruct-lecore-hrr",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/Llama-3.3-70B-Instruct-lecore-hrr",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/Llama-3.3-70B-Instruct-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/DeepSeek-R1-Distill-Llama-70B-lecore-GGUF",
+      "path": "DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/gemma-3-27b-it-lecore-hrr",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/DeepSeek-R1-Distill-Llama-70B-lecore-hrr",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/Llama-3.3-70B-Instruct-lecore-GGUF",
+      "path": "Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/Qwen2.5-0.5B-lecore-infmem",
+      "reason": "Research/custom HRR or delta-rule checkpoint, gates, or historical training artifacts; no compatible standalone GGUF model. WIP/failing recall disclosed where card exists; custom code/backend needed and excluded from automatic production routes."
+    },
+    {
+      "repository": "staccs/Qwen3-32B-lecore-19g-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/Seed-OSS-36B-Instruct-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present. No GGUF counterpart in staccs public repos; distinct model retained as conversion-needed candidate, not silently dropped."
+    },
+    {
+      "repository": "staccs/Qwen3-32B-lecore-19g-GGUF",
+      "path": "Qwen3-32B-lecore-19g-GGUF-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/Qwen3.8-27B-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/Muse-Glimmer-30B-lecore-mlx",
+      "reason": "MLX affine-quantized safetensors are not directly loadable by Windows llama.cpp/Vulkan; GGUF counterpart selected when present."
+    },
+    {
+      "repository": "staccs/Qwen3.8-27B-lecore-GGUF",
+      "path": "Qwen3.8-27B-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    },
+    {
+      "repository": "staccs/Muse-Glimmer-30B-lecore-GGUF",
+      "path": "Muse-Glimmer-30B-Q4_K_M.gguf",
+      "reason": "Stock Q4_K_M baseline alternate quantization, not a distinct leCore checkpoint; select lecore-mix instead. Cataloged in full inventory."
+    }
+  ],
+  "coverage": {
+    "publicRepositoriesEnumerated": 38,
+    "listPaginationPages": 2,
+    "allLeCoreRelated": true,
+    "distinctGGUFCheckpoints": 10,
+    "selectedGGUFFiles": 11,
+    "selectedBytes": 196835527136,
+    "sourceInventory": "STACCS_MODELS.md",
+    "completeForPublishedGGUF": true,
+    "allPotentiallyRunnableDistinctModelsCovered": false,
+    "pendingNonGGUFDistinctModels": [
+      "staccs/Seed-OSS-36B-Instruct-lecore-mlx",
+      "staccs/lecore-bge-assimilated",
+      "staccs/lecore-qwen35-9b-assimilated",
+      "staccs/Qwen3.5-0.8B-lecore-assimilated"
+    ],
+    "scopeNote": "Not a shortlist: selects every published leCore GGUF checkpoint, including both distinct Qwen3-32B precision allocations and Muse-Glimmer vision companion. Non-GGUF candidates remain explicit pending conversions; not claimed deployed."
+  },
+  "safety": {
+    "remoteCodeExecution": false,
+    "weightsDownloadedByInventoryTask": false,
+    "enableOnlyAfterLocalValidation": true,
+    "doNotLoadAllSimultaneously": true,
+    "maxSystemMemoryGiB": 128,
+    "memoryNote": "File bytes are not peak RAM; budget OS, runtime buffers, KV cache, multimodal projector and other processes; use on-demand unload and smoke-test bounded contexts."
+  }
+}
