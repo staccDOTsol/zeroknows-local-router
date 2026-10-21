@@ -13,7 +13,7 @@ import {SessionMemory,memoryConfiguration,memoryAccess,sessionHeader,withSession
 import {buildCodexCatalog,readCatalogTemplate} from './model-catalog.mjs';
 
 const root=fileURLToPath(new URL('.',import.meta.url));
-const defaults={port:8090,requestMs:600000,queueMs:120000,maxQueued:8,minFreeMemoryGiB:16,heartbeatMs:15000,streamIdleMs:120000,routeHeaderTimeoutMs:120000,chat:{url:'http://127.0.0.1:8080',protocol:'responses',maxActive:1},embedding:{url:'http://127.0.0.1:8081',protocol:'responses',maxActive:2},actual:null};
+const defaults={port:8090,requestMs:600000,queueMs:120000,maxQueued:8,minFreeMemoryGiB:16,heartbeatMs:15000,responseHeartbeatMode:'event',streamIdleMs:120000,routeHeaderTimeoutMs:120000,chat:{url:'http://127.0.0.1:8080',protocol:'responses',maxActive:1},embedding:{url:'http://127.0.0.1:8081',protocol:'responses',maxActive:2},actual:null};
 export function configuration(file){
  const config={...structuredClone(defaults),...(file?JSON.parse(readFileSync(file,'utf8')):{})};
  for(const key of ['chat','embedding','actual'])if(config[key]){
@@ -25,6 +25,7 @@ export function configuration(file){
  if(config.actual&&(!Array.isArray(config.actual.models)||!config.actual.models.length))throw new Error('Actual backend requires explicit model aliases');
  if(config.registry){const registryPath=fileURLToPath(new URL(config.registry,new URL('.',import.meta.url)));config.pool=new ModelPool(readRegistry(registryPath),new WindowsController(registryPath,config.powershell||'pwsh'),config);}
  for(const [key,min,max] of [['port',1024,65535],['requestMs',100,1800000],['queueMs',10,300000],['maxQueued',0,32],['minFreeMemoryGiB',0,64],['heartbeatMs',10,60000],['streamIdleMs',100,1800000],['routeHeaderTimeoutMs',10,600000]])if(!Number.isInteger(config[key])||config[key]<min||config[key]>max)throw new Error(`Invalid ${key}`);
+ if(!['event','comment'].includes(config.responseHeartbeatMode))throw new Error('Invalid responseHeartbeatMode');
  config.sessionMemory=memoryConfiguration(config.sessionMemory);
  return config;
 }
@@ -144,7 +145,7 @@ const server=http.createServer(async(req,res)=>{
     try{adapter=adaptRequest(body);body=adapter.body;}catch(error){return fail(res,status=400,error.message);}
    }
    if(memoryAttached)assertMemoryPromptBudget(body,memory);
-   if(body.stream===true&&['/v1/responses','/v1/chat/completions'].includes(path))channel=new SSEChannel(res,{signal:abort.signal,heartbeatMs:config.heartbeatMs,requestId,protocol:path==='/v1/responses'?'responses':'chat',onError:error=>abort.abort(error)});
+   if(body.stream===true&&['/v1/responses','/v1/chat/completions'].includes(path))channel=new SSEChannel(res,{signal:abort.signal,heartbeatMs:config.heartbeatMs,requestId,protocol:path==='/v1/responses'?'responses':'chat',heartbeatMode:path==='/v1/responses'?config.responseHeartbeatMode:'comment',onError:error=>abort.abort(error)});
    if(!config.pool){
    backend=path==='/v1/embeddings'?config.embedding:config.actual?.models.includes(model)?config.actual:config.chat;
    upstream=backend.url;
@@ -206,7 +207,7 @@ const server=http.createServer(async(req,res)=>{
   if(status>=400){
    const errorText=JSON.stringify(await readJSON(reply,1024*1024));
    if(status===500&&/Jinja Exception|System message must be at the beginning|context size|exceeds.*context|Failed to parse tool call arguments as JSON/i.test(errorText))status=400;
-   if(channel?.committed)throw new GatewayError(status,JSON.parse(errorText)?.error?.message||`Local upstream returned HTTP ${status}`);
+   if(channel?.committed){const error=JSON.parse(errorText)?.error;throw new GatewayError(status,error?.message||`Local upstream returned HTTP ${status}`,error);}
    channel?.stop();
    res.writeHead(status,{'content-type':reply.headers.get('content-type')||'application/json'});res.end(errorText);return;
   }

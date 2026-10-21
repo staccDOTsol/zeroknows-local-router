@@ -11,7 +11,8 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(predicate,message){const end=Date.now()+1500;while(!predicate()&&Date.now()<end)await sleep(5);assert.ok(predicate(),message);}
 const emit=(res,value)=>res.write(`data: ${JSON.stringify(value)}\n\n`);
 function complete(res,marker){res.setHeader?.('content-type','text/event-stream');emit(res,{type:'response.output_text.delta',item_id:'msg_'+marker,delta:marker});emit(res,{type:'response.completed',response:{id:'resp_'+marker,object:'response',status:'completed',output:[{type:'message',content:[{type:'output_text',text:marker}]}]}});res.end();}
-async function read(response){const frames=[];for await(const frame of sseFrames(response.body))frames.push(frame);return {frames,events:frames.map(frameData).filter(raw=>raw&&raw!=='[DONE]').map(raw=>JSON.parse(raw))};}
+const isKeepalive=frame=>frame.startsWith('event: local.gateway.keepalive')||frame.startsWith(': local-keepalive');
+async function read(response){const frames=[];for await(const frame of sseFrames(response.body))frames.push(frame);const all=frames.map(frameData).filter(raw=>raw&&raw!=='[DONE]').map(raw=>JSON.parse(raw));return {frames,controls:all.filter(event=>event.type==='local.gateway.keepalive'),events:all.filter(event=>event.type!=='local.gateway.keepalive')};}
 async function fixture(t,handler,options={}){
  const received=[];let closed=0;
  const backend=http.createServer(async(req,res)=>{
@@ -34,15 +35,15 @@ function managed(config,{delay=0,queueMs=600}={}){
  const pool=new ModelPool({models:[model],idleEvictMs:60000},controller,{queueMs,maxQueued:4,pollMs:2});config.pool=pool;return {pool,controller};
 }
 
-test('delayed backend headers receive comments before model output',async t=>{
+test('delayed backend headers receive parsed control heartbeats before model output',async t=>{
  let sent=false;const f=await fixture(t,async(body,res)=>{await sleep(160);sent=true;complete(res,body.input);});
  const response=await f.request('delayed-headers');assert.equal(response.status,200);assert.equal(sent,false);assert.match(response.headers.get('content-type'),/event-stream/);
- const value=await read(response);assert.match(value.frames[0],/^: local-keepalive/);assert.ok(value.frames.filter(frame=>frame.startsWith(': local-keepalive')).length>=2);assert.equal(value.events.at(-1).response.output[0].content[0].text,'delayed-headers');
+ const value=await read(response);assert.equal(isKeepalive(value.frames[0]),true);assert.ok(value.frames.filter(isKeepalive).length>=2);assert.equal(value.events.at(-1).response.output[0].content[0].text,'delayed-headers');
 });
 
-test('delayed first token receives comments despite upstream headers already being ready',async t=>{
+test('delayed first token receives control heartbeats despite upstream headers already being ready',async t=>{
  const f=await fixture(t,async(body,res)=>{res.writeHead(200,{'content-type':'text/event-stream'});res.flushHeaders();await sleep(150);emit(res,{type:'response.output_text.delta',delta:body.input});emit(res,{type:'response.completed',response:{output:[]}});res.end();});
- const value=await read(await f.request('first-token'));assert.ok(value.frames.filter(frame=>frame.startsWith(': local-keepalive')).length>=2);assert.equal(value.events[0].delta,'first-token');assert.equal(value.events.at(-1).type,'response.completed');
+ const value=await read(await f.request('first-token'));assert.ok(value.frames.filter(isKeepalive).length>=2);assert.equal(value.events[0].delta,'first-token');assert.equal(value.events.at(-1).type,'response.completed');
 });
 
 test('slow queue stays alive, remains bounded, and never mixes concurrent request output',async t=>{
@@ -50,7 +51,7 @@ test('slow queue stays alive, remains bounded, and never mixes concurrent reques
  const first=await f.request('slow-owner'),second=await f.request('queued-fast');assert.equal(f.received.length,1);
  const overflow=await f.request('overflow');assert.equal(overflow.status,429);assert.match((await overflow.json()).error.message,/queue is full/);
  const [a,b]=await Promise.all([read(first),read(second)]);assert.notEqual(first.headers.get('x-request-id'),second.headers.get('x-request-id'));
- assert.ok(b.frames.some(frame=>frame.startsWith(': local-keepalive')));assert.equal(a.events[0].delta,'slow-owner');assert.equal(b.events[0].delta,'queued-fast');assert.equal(f.config.chat.limiter.active,0);
+ assert.ok(b.frames.some(isKeepalive));assert.equal(a.events[0].delta,'slow-owner');assert.equal(b.events[0].delta,'queued-fast');assert.equal(f.config.chat.limiter.active,0);
 });
 
 test('real ModelPool cold admission heartbeats and publishes final route as a comment',async t=>{
@@ -63,13 +64,13 @@ test('real ModelPool cold admission heartbeats and publishes final route as a co
 test('upstream comments and ping events cannot mask idle model failure',async t=>{
  for(const ping of [': backend-alive\n\n','event: ping\ndata: {}\n\n','event: ping\ndata: still alive\n\n','data: {"type":"heartbeat"}\n\n']){
   const f=await fixture(t,(_body,res)=>{res.writeHead(200,{'content-type':'text/event-stream'});res.flushHeaders();const timer=setInterval(()=>res.write(ping),15);res.once('close',()=>clearInterval(timer));},{streamIdleMs:120});
-  const started=Date.now(),value=await read(await f.request('idle'));assert.equal(value.events.length,1);assert.equal(value.events.at(-1).type,'error');assert.equal(value.events.at(-1).status,504);assert.match(value.events.at(-1).message,/idle deadline/);assert.ok(Date.now()-started<1200);await until(()=>f.config.chat.limiter.active===0&&f.closed()===1,'idle timeout releases slot and aborts upstream');
+  const started=Date.now(),value=await read(await f.request('idle'));assert.equal(value.events.length,1);assert.equal(value.events.at(-1).type,'response.failed');assert.equal(value.events.at(-1).status,504);assert.match(value.events.at(-1).response.error.message,/idle deadline/);assert.ok(Date.now()-started<1200);await until(()=>f.config.chat.limiter.active===0&&f.closed()===1,'idle timeout releases slot and aborts upstream');
  }
 });
 
 test('absolute request deadline still bounds genuinely progressing streams',async t=>{
  const f=await fixture(t,(_body,res)=>{res.writeHead(200,{'content-type':'text/event-stream'});const timer=setInterval(()=>emit(res,{type:'response.output_text.delta',delta:'progress'}),20);res.once('close',()=>clearInterval(timer));},{requestMs:180,streamIdleMs:100});
- const result=await read(await f.request('never-finishes'));assert.ok(result.events.filter(event=>event.type==='response.output_text.delta').length>=2);assert.equal(result.events.at(-1).type,'error');assert.match(result.events.at(-1).message,/request deadline/);assert.equal(f.received.length,1);await until(()=>f.config.chat.limiter.active===0,'deadline releases active slot');
+ const result=await read(await f.request('never-finishes'));assert.ok(result.events.filter(event=>event.type==='response.output_text.delta').length>=2);assert.equal(result.events.at(-1).type,'response.failed');assert.match(result.events.at(-1).response.error.message,/request deadline/);assert.equal(f.received.length,1);await until(()=>f.config.chat.limiter.active===0,'deadline releases active slot');
 });
 
 test('disconnect after queue heartbeat removes queued work without submitting it',async t=>{
@@ -85,19 +86,19 @@ test('disconnect while cold load is started leaves no inference or orphaned leas
 test('late upstream HTTP rejection becomes terminal SSE error; early and nonstream errors retain status',async t=>{
  const f=await fixture(t,async(body,res)=>{if(body.input==='late'||!body.stream)await sleep(100);res.writeHead(422,{'content-type':'application/json'});res.end('{"error":{"message":"model rejects shape"}}');});
  const early=await f.request('early');assert.equal(early.status,422);assert.equal((await early.json()).error.message,'model rejects shape');
- const late=await f.request('late');assert.equal(late.status,200);const value=await read(late);assert.equal(value.events.at(-1).type,'error');assert.equal(value.events.at(-1).status,422);assert.equal(value.events.at(-1).message,'model rejects shape');
+ const late=await f.request('late');assert.equal(late.status,200);const value=await read(late);assert.equal(value.events.at(-1).type,'response.failed');assert.equal(value.events.at(-1).status,422);assert.equal(value.events.at(-1).response.error.message,'model rejects shape');
  const nonstream=await f.request('nonstream',{stream:false});assert.equal(nonstream.status,422);assert.match(nonstream.headers.get('content-type'),/json/);assert.equal((await nonstream.json()).error.message,'model rejects shape');
 });
 
 test('partial tool output followed by socket failure is not replayed and gets terminal error',async t=>{
  const f=await fixture(t,(_body,res)=>{res.writeHead(200,{'content-type':'text/event-stream'});emit(res,{type:'response.output_item.added',item:{id:'tool-1',type:'function_call',call_id:'call-1',name:'write_file',arguments:''}});emit(res,{type:'response.function_call_arguments.delta',item_id:'tool-1',delta:'{"path":'});setTimeout(()=>res.destroy(),35);});
  const {pool}=managed(f.config);const result=await read(await f.request('partial-tool',{model:'auto',tools:[{type:'function',name:'write_file',parameters:{type:'object',properties:{}}}]}));
- assert.equal(result.events.filter(event=>event.type==='response.output_item.added').length,1);assert.equal(result.events.at(-1).type,'error');assert.deepEqual(result.events.map(event=>event.sequence_number),result.events.map((_,index)=>index));assert.equal(f.received.length,1);assert.equal(pool.events.filter(event=>event.type==='route').length,1);
+ assert.equal(result.events.filter(event=>event.type==='response.output_item.added').length,1);assert.equal(result.events.at(-1).type,'response.failed');assert.deepEqual(result.events.map(event=>event.sequence_number),result.events.map((_,index)=>index));assert.equal(f.received.length,1);assert.equal(pool.events.filter(event=>event.type==='route').length,1);
 });
 
 test('premature clean EOF is terminal error, not a successful response',async t=>{
  const f=await fixture(t,(_body,res)=>{res.writeHead(200,{'content-type':'text/event-stream'});emit(res,{type:'response.output_text.delta',delta:'partial'});res.end('data: [DONE]\n\n');});
- const result=await read(await f.request('eof'));assert.equal(result.events.at(-1).type,'error');assert.match(result.events.at(-1).message,/before a terminal event/);assert.ok(result.frames.every(frame=>frameData(frame)!=='[DONE]'));assert.equal(f.received.length,1);
+ const result=await read(await f.request('eof'));assert.equal(result.events.at(-1).type,'response.failed');assert.match(result.events.at(-1).response.error.message,/before a terminal event/);assert.ok(result.frames.every(frame=>frameData(frame)!=='[DONE]'));assert.equal(f.received.length,1);
 });
 
 test('terminal response ends immediately even if backend leaves its connection open',async t=>{
@@ -119,12 +120,12 @@ test('slow reader applies backpressure while fast stream proceeds, and cancellat
 
 test('header wait is bounded for static backends as well as managed routes',async t=>{
  const f=await fixture(t,()=>{},{routeHeaderTimeoutMs:120,requestMs:1000});
- const result=await read(await f.request('header-timeout'));assert.equal(result.events.at(-1).status,504);assert.match(result.events.at(-1).message,/response headers/);await until(()=>f.config.chat.limiter.active===0,'header timeout releases slot');
+ const result=await read(await f.request('header-timeout'));assert.equal(result.events.at(-1).status,504);assert.match(result.events.at(-1).response.error.message,/response headers/);await until(()=>f.config.chat.limiter.active===0,'header timeout releases slot');
 });
 
 test('queue deadline after heartbeats is an SSE error, not infinite keepalive',async t=>{
  const f=await fixture(t,()=>{},{queueMs:100});const active=await f.request('active');
- const response=await f.request('queue-expiry'),value=await read(response);assert.equal(response.status,200);assert.ok(value.frames.some(frame=>frame.startsWith(': local-keepalive')));assert.equal(value.events.at(-1).status,504);assert.match(value.events.at(-1).message,/queue wait timed out/);assert.equal(f.received.length,1);assert.equal(f.config.chat.limiter.queue.length,0);await active.body.cancel();await until(()=>f.config.chat.limiter.active===0,'active owner canceled');
+ const response=await f.request('queue-expiry'),value=await read(response);assert.equal(response.status,200);assert.ok(value.frames.some(isKeepalive));assert.equal(value.events.at(-1).status,504);assert.match(value.events.at(-1).response.error.message,/queue wait timed out/);assert.equal(f.received.length,1);assert.equal(f.config.chat.limiter.queue.length,0);await active.body.cancel();await until(()=>f.config.chat.limiter.active===0,'active owner canceled');
 });
 
 test('comments do not prevent pre-output failover and final route metadata names the actual backend',async t=>{
@@ -138,7 +139,7 @@ test('comments do not prevent pre-output failover and final route metadata names
 
 test('empty Chat chunks and usage-only events are not model progress',async t=>{
  const f=await fixture(t,(_body,res)=>{res.writeHead(200,{'content-type':'text/event-stream'});const timer=setInterval(()=>{emit(res,{choices:[{delta:{}}]});emit(res,{choices:[],usage:{prompt_tokens:1}});},15);res.once('close',()=>clearInterval(timer));},{streamIdleMs:110});f.config.chat.protocol='chat';
- const result=await read(await f.request('empty-chat'));assert.equal(result.events[0].type,'response.created');assert.equal(result.events.at(-1).type,'error');assert.equal(result.events.at(-1).status,504);assert.equal(result.events.filter(event=>event.type==='response.completed').length,0);
+ const result=await read(await f.request('empty-chat'));assert.equal(result.events[0].type,'response.created');assert.equal(result.events.at(-1).type,'response.failed');assert.equal(result.events.at(-1).status,504);assert.equal(result.events.filter(event=>event.type==='response.completed').length,0);
 });
 
 test('Chat trailing usage and terminal marker survive streaming adaptation',async t=>{
@@ -155,4 +156,26 @@ test('direct Chat endpoint uses the Chat error envelope after heartbeat commitme
 test('managed admission receives expanded tool schemas actually sent to the backend',async t=>{
  const f=await fixture(t,(body,res)=>complete(res,'adapted'));const {pool}=managed(f.config);let admitted;const acquire=pool.acquire.bind(pool);pool.acquire=(body,...rest)=>{admitted=structuredClone(body);return acquire(body,...rest);};
  await read(await f.request('tool budgeting',{model:'auto',tools:[{type:'custom',name:'apply_patch',description:'Apply a raw patch'}]}));assert.equal(admitted.tools[0].type,'function');assert.deepEqual(admitted.tools,f.received[0].tools);assert.ok(admitted.tools[0].parameters.properties.input);
+});
+
+test('Responses heartbeat extension is namespaced control data without model sequence or output',async t=>{
+ const f=await fixture(t,async(body,res)=>{await sleep(120);complete(res,body.input);});
+ const response=await f.request('namespaced-heartbeat'),value=await read(response);assert.equal(response.headers.get('x-local-heartbeat'),'local.gateway.keepalive');assert.ok(value.controls.length>=2);
+ for(const control of value.controls){assert.deepEqual(Object.keys(control).sort(),['request_id','type']);assert.equal(control.request_id,response.headers.get('x-request-id'));}
+ assert.deepEqual(value.events.map(event=>event.sequence_number),value.events.map((_,index)=>index));
+});
+
+test('explicit comment mode remains available for clients that reject gateway SSE extensions',async t=>{
+ const f=await fixture(t,async(body,res)=>{await sleep(100);complete(res,body.input);},{responseHeartbeatMode:'comment'});
+ const response=await f.request('legacy-comment'),value=await read(response);assert.equal(response.headers.get('x-local-heartbeat'),'comment');assert.equal(value.controls.length,0);assert.ok(value.frames.some(frame=>frame.startsWith(': local-keepalive')));assert.equal(value.events.at(-1).type,'response.completed');
+});
+
+test('upstream generic error becomes response.failed, preserving real response identity and message',async t=>{
+ const f=await fixture(t,async(_body,res)=>{res.writeHead(200,{'content-type':'text/event-stream'});emit(res,{type:'response.created',response:{id:'real-upstream-id',status:'in_progress',output:[]}});await sleep(100);emit(res,{type:'error',message:'SYNTHETIC_UPSTREAM_FAILURE'});res.end();});
+ const value=await read(await f.request('error-shape'));const terminal=value.events.at(-1);assert.equal(terminal.type,'response.failed');assert.equal(terminal.response.id,'real-upstream-id');assert.equal(terminal.response.status,'failed');assert.equal(terminal.response.error.message,'SYNTHETIC_UPSTREAM_FAILURE');assert.equal(terminal.sequence_number,1);assert.equal(f.received.length,1);
+});
+
+test('upstream generic error preserves classification rather than turning known errors into retryable local failures',async t=>{
+ const f=await fixture(t,(_body,res)=>{res.writeHead(200,{'content-type':'text/event-stream'});emit(res,{type:'response.created',response:{id:'context-id'}});emit(res,{type:'error',error:{code:'context_length_exceeded',type:'invalid_request_error',message:'CONTEXT_FIXTURE'}});res.end();});
+ const value=await read(await f.request('typed-error'));assert.deepEqual(value.events.at(-1).response.error,{code:'context_length_exceeded',type:'invalid_request_error',message:'CONTEXT_FIXTURE',param:null});
 });

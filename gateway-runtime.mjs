@@ -1,5 +1,5 @@
 export class GatewayError extends Error {
- constructor(status,message){super(message);this.status=status;}
+ constructor(status,message,upstreamError){super(message);this.status=status;if(upstreamError)this.upstreamError={...(typeof upstreamError.code==='string'?{code:upstreamError.code}:{}),...(typeof upstreamError.type==='string'&&upstreamError.type!=='error'?{type:upstreamError.type}:{})};}
 }
 export function localURL(value){
  const url=new URL(value);
@@ -46,20 +46,25 @@ export async function* sseFrames(stream,maxFrameBytes=1024*1024){
 export function frameData(frame){return frame.split('\n').filter(x=>x.startsWith('data:')).map(x=>x.slice(5).trimStart()).join('\n');}
 
 // A delayed first heartbeat preserves ordinary HTTP validation/admission errors.
-// Once the first comment commits HTTP 200, later failures must be SSE errors:
+// Once the first heartbeat commits HTTP 200, later failures must be SSE errors:
 // status codes and route headers can no longer be changed on that connection.
 export class SSEChannel {
- constructor(response,{signal,heartbeatMs=15000,requestId,protocol='responses',onError=()=>{}}={}){
+ constructor(response,{signal,heartbeatMs=15000,requestId,protocol='responses',heartbeatMode=protocol==='responses'?'event':'comment',onError=()=>{}}={}){
   this.response=response;this.signal=signal;this.requestId=requestId;this.protocol=protocol;
-  this.blocked=null;this.metadata=null;this.nextSequence=0;this.lastWrite=Date.now();
+  this.heartbeatMode=heartbeatMode;this.blocked=null;this.metadata=null;this.nextSequence=0;this.lastWrite=this.lastEvent=Date.now();
   this.timer=setInterval(()=>{
-   if(this.blocked||response.destroyed||response.writableEnded||Date.now()-this.lastWrite<heartbeatMs)return;
-   this.write(': local-keepalive\n\n').catch(onError);
+   const lastActivity=heartbeatMode==='event'?this.lastEvent:this.lastWrite;
+   if(this.blocked||response.destroyed||response.writableEnded||Date.now()-lastActivity<heartbeatMs)return;
+   // Codex 0.163 times out parsed SSE events, not raw comment bytes. This is
+   // explicitly gateway transport metadata, never a model delta/tool/lifecycle
+   // event, and deliberately has no model sequence_number or response id.
+   const frame=heartbeatMode==='event'?`event: local.gateway.keepalive\ndata: ${JSON.stringify({type:'local.gateway.keepalive',request_id:requestId})}\n\n`:': local-keepalive\n\n';
+   this.write(frame).catch(onError);
   },heartbeatMs);this.timer.unref?.();
  }
  get committed(){return this.response.headersSent;}
  open(){
-  if(!this.committed)this.response.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-store','x-accel-buffering':'no','x-local-route-metadata':this.metadata?'sse-comment':'headers-or-sse-comment'});
+  if(!this.committed)this.response.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-store','x-accel-buffering':'no','x-local-heartbeat':this.heartbeatMode==='event'?'local.gateway.keepalive':'comment','x-local-route-metadata':this.metadata?'sse-comment':'headers-or-sse-comment'});
  }
  headers(headers){
   if(!this.committed){for(const [key,value] of Object.entries(headers))this.response.setHeader(key,value);}
@@ -72,7 +77,8 @@ export class SSEChannel {
   this.open();
   if(this.metadata){const metadata=this.metadata;this.metadata=null;await this.raw(': local-route '+JSON.stringify(metadata)+'\n\n');}
   const data=frameData(String(chunk));
-  try{const value=JSON.parse(data);if(Number.isInteger(value.sequence_number))this.nextSequence=Math.max(this.nextSequence,value.sequence_number+1);}catch{}
+  if(data)this.lastEvent=Date.now();
+  try{const value=JSON.parse(data);if(Number.isInteger(value.sequence_number))this.nextSequence=Math.max(this.nextSequence,value.sequence_number+1);if(typeof value.response?.id==='string')this.responseId=value.response.id;}catch{}
   await this.raw(chunk);
  }
  async raw(chunk){
@@ -94,9 +100,12 @@ export class SSEChannel {
   // Never queue an error behind an unbounded slow consumer. The request deadline
   // also bounds backpressure; cancellation must release its backend lease.
   if(this.blocked||this.response.writableNeedDrain||error.status===499){this.response.destroy();return;}
-  const detail={code:error.status===504?'local_upstream_timeout':'local_upstream_error',message:error.message,type:'server_error'};
-  const value=this.protocol==='responses'?{type:'error',code:detail.code,message:detail.message,param:null,sequence_number:this.nextSequence,request_id:this.requestId,status:error.status||502}:{error:{...detail,request_id:this.requestId,status:error.status||502}};
-  this.response.end((this.protocol==='responses'?'event: error\n':'')+'data: '+JSON.stringify(value)+'\n\n');
+  const detail={code:error.status===504?'local_upstream_timeout':'local_upstream_error',type:'server_error',...error.upstreamError,message:error.message};
+  // Codex ignores generic type:error except a narrow provider-specific code.
+  // response.failed plus immediate EOF preserves the real error instead of
+  // falling back to "stream closed before response.completed" or another idle.
+  const value=this.protocol==='responses'?{type:'response.failed',sequence_number:this.nextSequence,request_id:this.requestId,status:error.status||502,response:{id:this.responseId||`resp_local_${this.requestId}`,object:'response',status:'failed',output:[],error:{...detail,param:null}}}:{error:{...detail,request_id:this.requestId,status:error.status||502}};
+  this.response.end((this.protocol==='responses'?'event: response.failed\n':'')+'data: '+JSON.stringify(value)+'\n\n');
  }
 }
 
@@ -115,6 +124,7 @@ export async function* superviseSSE(stream,{idleMs=120000,protocol='responses',o
    let keepalive=['ping','heartbeat','keepalive'].includes(eventName);
    if(raw&&raw!=='[DONE]'&&!keepalive){
     try{value=JSON.parse(raw);}catch{throw new GatewayError(502,'Backend returned invalid SSE JSON');}
+    if(protocol==='responses'&&value?.type==='error')throw new GatewayError(Number.isInteger(value.status)&&value.status>=400&&value.status<=599?value.status:502,value.message||value.error?.message||'Backend stream error',value.error||value);
     const idleEvents=['ping','heartbeat','keepalive','response.queued','response.in_progress','response.created'];
     keepalive=['ping','heartbeat','keepalive'].includes(value?.type);
     const nonempty=value=>typeof value==='string'&&value.length>0;
@@ -122,7 +132,7 @@ export async function* superviseSSE(stream,{idleMs=120000,protocol='responses',o
      ? nonempty(value?.delta)||['response.output_item.added','response.output_item.done','response.content_part.added','response.content_part.done','response.completed','response.incomplete','response.failed','error'].includes(value?.type)
      : value?.choices?.some(choice=>nonempty(choice.finish_reason)||['content','reasoning_content','reasoning','refusal'].some(key=>nonempty(choice.delta?.[key]))||choice.delta?.tool_calls?.some(call=>nonempty(call.id)||nonempty(call.function?.name)||nonempty(call.function?.arguments)));
     if(progress&&!idleEvents.includes(value?.type)&&!idleEvents.includes(eventName))remaining=idleMs;
-    if(protocol==='responses'&&value?.error&&!['response.failed','error'].includes(value.type))throw new GatewayError(502,value.error.message||'Backend stream error');
+    if(protocol==='responses'&&value?.error&&!['response.failed','error'].includes(value.type))throw new GatewayError(502,value.error.message||'Backend stream error',value.error);
    }
    if(protocol==='responses')terminal=['response.completed','response.incomplete','response.failed','error'].includes(value?.type);
    else terminal=raw==='[DONE]'||terminal||!!value?.choices?.some(choice=>choice.finish_reason)||!!value?.error;
