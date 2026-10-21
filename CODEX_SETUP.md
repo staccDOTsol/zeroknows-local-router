@@ -76,3 +76,93 @@ node --test test-model-catalog.mjs
 The optional tests use a fresh temporary home with no login, a non-serving loopback inference URL, and only initialization/model-list RPCs. They verify that the generated catalog gives AUTO `hidden: false` and `isDefault: true`, and that the file overrides an unavailable provider catalog URL. No inference turn is sent. Standard CI skips these optional binary checks unless explicitly enabled.
 
 Verified in the cloud workspace with Node.js 24.19.0 and official Codex CLI 0.163.0. Actual Windows desktop UI, its installed profile, and real-model generation were not exercised by this validation.
+
+## Backed-up offline repair helper (Windows or Linux)
+
+`repair-codex-auto.mjs` runs entirely locally with existing Node 24+ and Python
+3.11+. It does not require paid credits, install dependencies, send inference,
+contact any endpoint, read authentication files, start/stop models, terminate an
+app, delete caches, or change security settings. The Python subprocess only
+parses and edits the explicitly selected configuration.
+
+First identify the **actual local app's** `CODEX_HOME` and selected configuration
+from its settings/launcher. This command lists likely filenames; it does **not**
+claim that one is active:
+
+```powershell
+node repair-codex-auto.mjs --inspect
+# For a known nondefault home:
+node repair-codex-auto.mjs --inspect --codex-home 'C:\path\to\codex-home'
+```
+
+The helper intentionally requires `--config`: a single base file on disk does
+not prove the desktop uses it. On current clients, select the exact
+`<profile>.config.toml` when a named profile is active. The adjacent `config.toml`
+is read as its base (or use `--base-config`). It remains untouched. On an older
+client that actually uses inline `[profiles.NAME]`, pass `--legacy-profile NAME`
+with its `config.toml`; no automatic profile migration is attempted. OpenAI
+changed this contract in 0.134.0; see [official profile documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles).
+
+Preview with the **existing real registry**, not the intentionally incomplete
+example registry. Substitute the exact paths you verified:
+
+```powershell
+node repair-codex-auto.mjs --registry 'C:\router\setup\model-registry.json' --config 'C:\codex-home\config.toml'
+```
+
+Close the app **normally** when no generation is in progress, then apply:
+
+```powershell
+node repair-codex-auto.mjs --registry 'C:\router\setup\model-registry.json' --config 'C:\codex-home\config.toml' --apply
+```
+
+The selected files must already specify a no-auth Responses provider at
+`http://127.0.0.1:8090/v1` (or the explicitly supplied `--gateway-url`, restricted
+to loopback). Authenticated/remote/mismatched providers are rejected, not silently
+rewritten. An optional `--template <existing-native-catalog.json>` preserves
+supported custom catalog labels/instructions. No template is read implicitly.
+
+What changes:
+
+- Creates a content-addressed catalog **beside the selected config**, derived
+  from validated registry metadata. Existing collisions are never overwritten.
+- Changes only that file/profile's `model` and `model_catalog_json`. Existing
+  explicit context/compaction overrides are capped downward when they exceed
+  AUTO's conservative window; smaller limits are preserved.
+- Parses TOML before and after and verifies complete semantic equality except
+  those selected keys. Unrelated source text and nonselected profiles remain
+  unchanged. An edited key's inline comment may be replaced. Unsupported
+  targeted syntax fails closed rather than rewriting the whole document.
+- Backs up the complete original beside it and atomically replaces the file.
+  Windows creates its temporary candidate with the original DACL already applied
+  and protected against broader directory inheritance, then uses `ReplaceFileW`
+  without ignoring ACL errors. Missing security-descriptor access or an EFS-encrypted source fails closed. A pre-write hash check
+  detects changed inputs. Repeating the same repair is a no-op.
+
+**Backups contain the original config and may include secrets. Keep backups and
+receipts private.** Backup contents retain the original file's permissions; receipts
+contain only paths and hashes and inherit the directory's protections. They must
+never be uploaded or committed. Generated files are gitignored as a precaution.
+Do not run concurrent config editors during repair. A failed Windows atomic
+replacement can have an uncertain outcome: inspect the config, backup and
+printed receipt location before retrying; the helper never retries blindly.
+
+For rollback, use the receipt path printed by a successful repair:
+
+```powershell
+node repair-codex-auto.mjs --rollback 'C:\codex-home\config.toml.auto-repair.TIMESTAMP.json' --apply
+```
+
+Rollback refuses to overwrite later user edits. It retains catalogs and creates
+a backup of the repaired file. No restart is forced.
+
+After applying, reopen the app normally and check **a new local thread's actual
+dropdown**. The helper verifies registry metadata and selected TOML files, not
+gateway readiness, managed/project/CLI overrides, the live app-server binding,
+or app UI. If AUTO is still missing, stop rewriting the config and inspect the
+live connection using the checkpoints above. A cloud test or fresh CLI probe is
+not evidence that the Windows dropdown changed.
+
+Regression tests: `node --test test-codex-auto-repair.mjs`. The aggregate suite
+runs these on both Windows and Linux; synthetic apply/rollback cases exercise
+Windows atomic replacement without touching a real user profile.
