@@ -38,7 +38,7 @@ function decorations(template) {
     .map(key => [key, structuredClone(template[key])]));
 }
 
-function descriptor({id, context, tasks}, priority, template = {}) {
+function descriptor({id, context, tasks}, priority, template = {}, windowed = false) {
   const automatic = id === 'auto';
   return {
     display_name: automatic ? 'AUTO (local)' : id,
@@ -63,15 +63,21 @@ function descriptor({id, context, tasks}, priority, template = {}) {
     visibility: automatic ? 'list' : (template.visibility ?? 'list'),
     supported_in_api: true,
     priority,
-    context_window: context,
-    max_context_window: context,
-    auto_compact_token_limit: Math.floor(context * 0.8),
+    // With the gateway's indexed context window enabled, Codex never compacts: the gateway
+    // forwards a bounded window plus lecore recall per conversation. Without it, advertise
+    // the real context and compact at 80% as before.
+    context_window: windowed ? Math.max(context, 1048576) : context,
+    max_context_window: windowed ? Math.max(context, 1048576) : context,
+    auto_compact_token_limit: windowed ? 1000000 : Math.floor(context * 0.8),
     input_modalities: tasks.includes('vision') ? ['text', 'image'] : ['text'],
+    // Codex only offers subagent tools (spawn_agent, send_input, wait, ...) to models whose
+    // catalog entry names a multi-agent version; v1 uses plain function tools.
+    multi_agent_version: 'v1',
     supports_image_detail_original: false,
   };
 }
 
-export function buildCodexCatalog(models, template = {models: []}) {
+export function buildCodexCatalog(models, template = {models: []}, {windowed = false} = {}) {
   if (!Array.isArray(models)) throw new Error('Model array required');
   validateTemplate(template);
   const chatModels = models.filter(model => model.tasks?.some(task => conversationalTasks.has(task)));
@@ -87,13 +93,15 @@ export function buildCodexCatalog(models, template = {models: []}) {
   const templates = new Map(template.models.map(model => [model.slug, model]));
   const automatic = {
     id: 'auto',
-    // Conservative across all possible conversational routes, not the largest
-    // model's limit (which would let the client overfill a smaller route).
-    context: Math.min(...chatModels.map(model => model.context)),
+    // The largest route: the router only sends a conversation to models whose context
+    // fits it (and fails over on overflow), so AUTO must not compact at the smallest model.
+    // Windowed: the router only sends a conversation to models whose context fits it, so AUTO
+    // advertises the largest route. Unwindowed: conservative across every possible route.
+    context: (windowed ? Math.max : Math.min)(...chatModels.map(model => model.context)),
     tasks: [...new Set(chatModels.flatMap(model => model.tasks))],
   };
   return {models: [
-    descriptor(automatic, -1, templates.get('auto')),
-    ...chatModels.map((model, index) => descriptor(model, index, templates.get(model.id))),
+    descriptor(automatic, -1, templates.get('auto'), windowed),
+    ...chatModels.map((model, index) => descriptor(model, index, templates.get(model.id), windowed)),
   ]};
 }

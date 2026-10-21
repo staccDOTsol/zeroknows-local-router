@@ -10,11 +10,12 @@ import {GatewayError,Limiter,localURL,readJSON,sseFrames,frameData,SSEChannel,su
 import {toChat,fromChat,chatEvents} from './actual-adapter.mjs';
 import {startDiscovery} from './startup-discovery.mjs';
 import {ModelPool,WindowsController,readRegistry} from './model-router.mjs';
+import {ContextWindow,contextWindowConfiguration,requireMemory} from './context-window.mjs';
 import {SessionMemory,memoryConfiguration,memoryAccess,sessionHeader,withSessionEvidence,assertMemoryPromptBudget} from './session-memory.mjs';
 import {buildCodexCatalog,readCatalogTemplate} from './model-catalog.mjs';
 
 const root=fileURLToPath(new URL('.',import.meta.url));
-const defaults={port:8090,requestMs:600000,queueMs:120000,maxQueued:8,minFreeMemoryGiB:16,heartbeatMs:15000,responseHeartbeatMode:'event',streamIdleMs:120000,routeHeaderTimeoutMs:120000,chat:{url:'http://127.0.0.1:8080',protocol:'responses',maxActive:1},embedding:{url:'http://127.0.0.1:8081',protocol:'responses',maxActive:2},actual:null};
+const defaults={port:8090,requestMs:86400000,queueMs:86400000,maxQueued:4096,minFreeMemoryGiB:16,heartbeatMs:15000,responseHeartbeatMode:'event',streamIdleMs:86400000,routeHeaderTimeoutMs:86400000,chat:{url:'http://127.0.0.1:8080',protocol:'responses',maxActive:1},embedding:{url:'http://127.0.0.1:8081',protocol:'responses',maxActive:2},actual:null};
 export function configuration(file){
  const config={...structuredClone(defaults),...(file?JSON.parse(readFileSync(file,'utf8')):{})};
  for(const key of ['chat','embedding','actual'])if(config[key]){
@@ -25,9 +26,10 @@ export function configuration(file){
  }
  if(config.actual&&(!Array.isArray(config.actual.models)||!config.actual.models.length))throw new Error('Actual backend requires explicit model aliases');
  if(config.registry){const registryPath=fileURLToPath(new URL(config.registry,new URL('.',import.meta.url)));config.pool=new ModelPool(readRegistry(registryPath),new WindowsController(registryPath,config.powershell||'pwsh'),config);}
- for(const [key,min,max] of [['port',1024,65535],['requestMs',100,1800000],['queueMs',10,300000],['maxQueued',0,32],['minFreeMemoryGiB',0,64],['heartbeatMs',10,60000],['streamIdleMs',100,1800000],['routeHeaderTimeoutMs',10,600000]])if(!Number.isInteger(config[key])||config[key]<min||config[key]>max)throw new Error(`Invalid ${key}`);
+ for(const [key,min,max] of [['port',1024,65535],['requestMs',100,86400000],['queueMs',10,86400000],['maxQueued',0,4096],['minFreeMemoryGiB',0,64],['heartbeatMs',10,60000],['streamIdleMs',100,86400000],['routeHeaderTimeoutMs',10,86400000]])if(!Number.isInteger(config[key])||config[key]<min||config[key]>max)throw new Error(`Invalid ${key}`);
  if(!['event','comment'].includes(config.responseHeartbeatMode))throw new Error('Invalid responseHeartbeatMode');
  config.sessionMemory=memoryConfiguration(config.sessionMemory);
+ config.contextWindow=contextWindowConfiguration(config.contextWindow);
  return config;
 }
 const allowed=new Set(['/v1/responses','/v1/chat/completions','/v1/embeddings','/v1/models','/health','/admin/models','/memory/bind','/memory/append','/memory/recall','/memory/delete']);
@@ -66,6 +68,7 @@ export async function* normalizeResponses(stream,adapter){
 export function createGateway(config=configuration(),{log=true,captureTools=false}={}){
 const port=config.port;
 const memory=config.sessionMemory?new SessionMemory(config.sessionMemory):null;
+const contextWindow=config.contextWindow?new ContextWindow(requireMemory(memory),config.contextWindow):null;
 const server=http.createServer(async(req,res)=>{
  const started=Date.now(),requestId=randomUUID(),abort=new AbortController();let status=500,model=null,upstream=null,release=null,queueMs=0,outcome='complete',memoryAttached=false,channel=null;
  res.setHeader('x-request-id',requestId);
@@ -85,7 +88,7 @@ const server=http.createServer(async(req,res)=>{
   if(req.method==='OPTIONS'){res.writeHead(status=204,{'access-control-allow-methods':'GET, POST, OPTIONS','access-control-allow-headers':'Content-Type, Authorization'});return res.end();}
   if(path==='/codex/models.json' && req.method==='GET'){
    const template=readCatalogTemplate(config.codexCatalog||root+'setup/local-model-catalog.json',{optional:!!config.pool});
-   const catalog=config.pool?buildCodexCatalog(config.pool.registry.models,template):template;
+   const catalog=config.pool?buildCodexCatalog(config.pool.registry.models,template,{windowed:!!config.contextWindow}):template;
    res.setHeader('cache-control','no-store');
    return json(res,status=200,catalog);
   }
@@ -121,11 +124,11 @@ const server=http.createServer(async(req,res)=>{
   let body,adapter,originalBody,embeddingMetadata,backend=config.chat;
   if(req.method==='POST'){
    let size=0;const chunks=[];
-   for await(const chunk of req){size+=chunk.length;if(size>20*1024*1024)return fail(res,status=413,'Request exceeds 20 MiB');chunks.push(chunk);}
+   for await(const chunk of req){size+=chunk.length;if(size>512*1024*1024)return fail(res,status=413,'Request exceeds 512 MiB');chunks.push(chunk);}
    try{body=JSON.parse(Buffer.concat(chunks));}catch{return fail(res,status=400,'Invalid JSON');}
    if(!body||typeof body!=='object'||Array.isArray(body))return fail(res,status=400,'JSON object required');
    model=body.model;
-   if(['qwen-abliterated','nemotron-super-vl-q4'].includes(model)&&body.reasoning?.effort==='none')body.chat_template_kwargs={...body.chat_template_kwargs,enable_thinking:false};
+   if(body.reasoning?.effort==='none')body.chat_template_kwargs={...body.chat_template_kwargs,enable_thinking:false};
    // Desktop tool calls may contain whole files. A 2048-token default cut
    // Nemotron calls in mid-JSON and made every later history replay fail.
    if(path==='/v1/responses')body.max_output_tokens??=model==='nemotron-super-vl-q4'?8192:2048;
@@ -136,6 +139,11 @@ const server=http.createServer(async(req,res)=>{
     memoryAccess(req);memoryAttached=true;
     const prepared=await withSessionEvidence(body,path,sessionHeader(req),memory,abort.signal);body=prepared.body;
     res.setHeader('x-local-memory-matches',String(prepared.matches));res.setHeader('x-local-memory-revision',String(prepared.revision));
+   }
+   // Indexed context window replaces client compaction: bounded prompt + lecore recall per conversation.
+   if(contextWindow&&path==='/v1/responses'&&typeof body.prompt_cache_key==='string'){
+    try{const windowed=await contextWindow.prepare(body,body.prompt_cache_key,abort.signal);body=windowed.body;res.setHeader('x-local-context',`${windowed.action};${windowed.keptItems??''}/${windowed.totalItems??''};~${windowed.estimatedTokens??''}t`);}
+    catch(error){if(abort.signal.aborted)throw error;res.setHeader('x-local-context','error');}
    }
    originalBody=structuredClone(body);
    if(path==='/v1/responses'){
@@ -167,13 +175,15 @@ const server=http.createServer(async(req,res)=>{
    // Admission must account for the actual expanded tool schemas/replay that
    // will be forwarded, not the smaller pre-adaptation client representation.
    const routingBody=structuredClone(body);
+   if(Array.isArray(body.tools)&&body.tools.length){try{const sourceTools=(originalBody?.tools||body.tools).flatMap(t=>t.type==='namespace'?(t.tools||[]).map(c=>(t.name||t.namespace||'ns')+'.'+(c.name||c.type)):[t.name||t.function?.name||t.type]);const names=sourceTools.filter(Boolean).sort().join(',');if(names!==config.lastToolNames){config.lastToolNames=names;appendFileSync(root+'logs/tool-offers.jsonl',JSON.stringify({time:new Date().toISOString(),model,effort:body.reasoning?.effort??null,count:sourceTools.length,tools:names.split(',')})+'\n');}}catch{}}
    const requestedModel=model,excluded=[],routeErrors=[];const attempts=requestedModel==='auto'?2:1;
    for(let attempt=0;attempt<attempts;attempt++){
     const queued=Date.now();const lease=await config.pool.acquire({...routingBody,model:requestedModel},path,abort.signal,excluded);queueMs+=Date.now()-queued;
     release=lease.release;backend=lease.backend;upstream=backend.url;model=lease.model;body.model=model;
     if(path==='/v1/embeddings'){embeddingMetadata={embedding_identity:lease.embeddingIdentity,dimensions:lease.embeddingDimensions};res.setHeader('x-local-embedding-identity',lease.embeddingIdentity);delete body.embedding_identity;}
     if(path==='/v1/responses'){adapter=adaptRequest({...originalBody,model});body=adapter.body;}
-    if(['qwen-abliterated','nemotron-super-vl-q4'].includes(model)&&body.reasoning?.effort==='none')body.chat_template_kwargs={...body.chat_template_kwargs,enable_thinking:false};
+    // Reasoning effort "none" turns thinking off for every local model (templates without the flag ignore it).
+    if(body.reasoning?.effort==='none')body.chat_template_kwargs={...body.chat_template_kwargs,enable_thinking:false};
     if(memoryAttached)assertMemoryPromptBudget(body,memory);
     // Do not publish a tentative model before a possible pre-output failover.
     routeHeaders={'x-local-model':model,'x-local-instance':lease.instance.key,'x-local-route':lease.info.task,'x-local-attempts':String(attempt+1)};
@@ -185,7 +195,7 @@ const server=http.createServer(async(req,res)=>{
       const code=reply.status;await reply.body?.cancel();excluded.push(model);routeErrors.push(`${model}:${code}`);release();release=null;continue;
      }
      if(attempt+1<attempts&&[400,413,422,500].includes(reply.status)){
-      const errorBody=await readJSON(reply,1024*1024);const errorCode=errorBody?.error?.code;
+      const errorBody=await readJSON(reply,1024*1024);const errorCode=errorBody?.error?.type==='exceed_context_size_error'?'context_length_exceeded':errorBody?.error?.code;
       if(['out_of_memory','context_length_exceeded','unsupported_modality'].includes(errorCode)){
        excluded.push(model);routeErrors.push(`${model}:${errorCode}`);release();release=null;continue;
       }

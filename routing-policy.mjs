@@ -3,7 +3,12 @@ import {createHash} from 'node:crypto';
 export const TASKS = ['general', 'reasoning', 'coding', 'vision', 'embedding'];
 const CAPABILITIES = ['text', 'vision', 'embedding', 'tools', 'json'];
 export const GiB = 1024 ** 3;
-export const HEADROOM_BYTES = 16 * GiB;
+// Reserve kept free when loading another model (Windows + desktop on shared UMA memory).
+export const HEADROOM_BYTES = 6 * GiB;
+// An already-loaded model has its memory reserved; only refuse new work below this floor.
+export const SERVE_FLOOR_BYTES = 1 * GiB;
+// Measured llama.cpp Vulkan compute + recurrent + host buffers stay under 1.5 GiB per instance.
+export const RUNTIME_OVERHEAD_BYTES = 3 * GiB;
 const text = value => typeof value === 'string' && value.trim().length > 0;
 const positive = value => Number.isSafeInteger(value) && value > 0;
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -99,15 +104,23 @@ export function eligibility(model, info, registry, {automatic = false, now = Dat
   return reasons;
 }
 
+// Parallel slots share one unified KV pool, so slot count costs no extra KV memory.
+// Default: as many slots as the pool holds 32K-token working windows (the context window keeps prompts near that size),
+// so resident conversations never crowd each other out; a registry "parallel" value overrides it.
+export function parallelSlots(model) {
+  if (Number.isInteger(model.parallel) && model.parallel >= 1 && model.parallel <= 1024) return model.parallel;
+  return Math.max(1, Math.min(1024, Math.floor(model.context / 32768)));
+}
+
 export function memoryEstimate(model, info, slots = 1) {
   // The controller reserves full configured KV context. Never admit on the
   // smaller request estimate while that allocation policy remains unchanged.
-  const fixed = model.weightBytes + (model.fixedCacheMiB || 0) * 1024 ** 2 + (model.promptCacheGiB ?? 1) * GiB + 8 * GiB;
+  const fixed = model.weightBytes + (model.fixedCacheMiB || 0) * 1024 ** 2 + (model.promptCacheGiB ?? 1) * GiB + RUNTIME_OVERHEAD_BYTES;
   return {
     requestKvBytes: model.kvBytesPerToken * info.tokens,
     requestWorkingSetBytes: fixed + model.kvBytesPerToken * info.tokens,
-    allocatedKvBytes: model.kvBytesPerToken * model.context * slots,
-    coldRequiredBytes: fixed + model.kvBytesPerToken * model.context * slots + HEADROOM_BYTES,
+    allocatedKvBytes: model.kvBytesPerToken * model.context, // unified pool shared by all slots
+    coldRequiredBytes: fixed + model.kvBytesPerToken * model.context + HEADROOM_BYTES,
     headroomBytes: HEADROOM_BYTES,
   };
 }
@@ -117,12 +130,12 @@ export function scoreCandidates(pool, candidates, info) {
     const instances = pool.usable(model).filter(instance => (instance.context ?? model.context) >= info.tokens);
     const available = instances.find(instance => pool.active(instance) < instance.slots);
     const filesReady = pool.inventory.find(item => item.id === model.id)?.ready === true;
-    const requestedSlots = (pool.pending.get(model.id) || 0) > 1 ? 2 : 1;
-    const plannedSlots = memoryEstimate(model, info, requestedSlots).coldRequiredBytes <= pool.freeBytes ? requestedSlots : 1;
+    const requestedSlots = parallelSlots(model);
+    const plannedSlots = requestedSlots;
     const memory = memoryEstimate(model, info, available?.slots || plannedSlots);
     const canLoad = filesReady && pool.instances.filter(instance => instance.model === model.id).length < model.ports.length;
     const loadFits = canLoad && memory.coldRequiredBytes <= pool.freeBytes;
-    const ready = !!available && pool.freeBytes >= HEADROOM_BYTES;
+    const ready = !!available && pool.freeBytes >= SERVE_FLOOR_BYTES;
     const tier = ready ? 0 : loadFits ? 1 : instances.length ? 2 : canLoad ? 3 : 4;
     const evaluation = evaluationFor(model, info, pool.registry, pool.now());
     const cold = model.routing?.coldLoad;
@@ -142,7 +155,10 @@ export function scoreCandidates(pool, candidates, info) {
   });
   // Lexicographic score, not arbitrary mixed units. Smaller weights are only an
   // operational cost tie-break, NEVER evidence of higher answer quality.
+  // Among already-loaded models with a free slot, the least busy one wins, so parallel
+  // requests spread across every resident model instead of piling onto the top-ranked one.
   rows.sort(({explanation: a}, {explanation: b}) => a.tier - b.tier ||
+    (a.tier === 0 && b.tier === 0 ? a.active - b.active : 0) ||
     Number(b.quality.status === 'measured') - Number(a.quality.status === 'measured') ||
     (b.quality.score ?? 0) - (a.quality.score ?? 0) || a.operatorPreference - b.operatorPreference ||
     (a.tier === 0 || info.images ? 0 : Number(a.mode === 'vision') - Number(b.mode === 'vision')) ||

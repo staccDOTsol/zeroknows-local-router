@@ -63,7 +63,7 @@ export async function* chatEvents(stream,body){
   const choice=chunk.choices?.[0];if(!choice)continue;
   const delta=choice.delta||{};if(choice.finish_reason)reason=choice.finish_reason;
   if(delta.content){
-   bytes+=Buffer.byteLength(delta.content);if(bytes>8*1024*1024)throw new GatewayError(502,'Accumulated output exceeds limit');
+   bytes+=Buffer.byteLength(delta.content);if(bytes>512*1024*1024)throw new GatewayError(502,'Accumulated output exceeds limit');
    if(!message){message={type:'message',id:id('msg'),role:'assistant',status:'in_progress',content:[]};response.output.push(message);yield emit({type:'response.output_item.added',output_index:response.output.indexOf(message),item:message});yield emit({type:'response.content_part.added',item_id:message.id,output_index:response.output.indexOf(message),content_index:0,part:{type:'output_text',text:'',annotations:[]}});}
    text+=delta.content;yield emit({type:'response.output_text.delta',item_id:message.id,output_index:response.output.indexOf(message),content_index:0,delta:delta.content});
   }
@@ -73,7 +73,7 @@ export async function* chatEvents(stream,body){
    if(!call){call={type:'function_call',id:id('fc'),call_id:tool.id||id('call'),name:'',arguments:'',status:'in_progress'};calls.set(tool.index,call);response.output.push(call);}
    if(tool.id)call.call_id=tool.id;
    if(tool.function?.name)call.name+=tool.function.name;
-   const args=tool.function?.arguments||'';call.arguments+=args;bytes+=Buffer.byteLength(args);if(bytes>8*1024*1024)throw new GatewayError(502,'Accumulated tool input exceeds limit');
+   const args=tool.function?.arguments||'';call.arguments+=args;bytes+=Buffer.byteLength(args);if(bytes>512*1024*1024)throw new GatewayError(502,'Accumulated tool input exceeds limit');
   }
  }
  if(!reason)throw new GatewayError(502,'Chat backend stream ended without a finish reason');

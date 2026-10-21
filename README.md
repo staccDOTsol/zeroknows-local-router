@@ -70,3 +70,14 @@ Early/non-streaming failures retain HTTP status codes. Once a delayed heartbeat 
 ## Relaunch AUTO and staged completed-model discovery
 
 See [exact local-home launcher](LOCAL_AUTO_LAUNCH.md) for a launch path that preserves the existing registry and current ready models. Optional [startup discovery](STARTUP_DISCOVERY.md) restores previously validated pinned GGUFs in the background. Default startup performs no new smoke loads; an explicit ready batch validates completed candidates serially with memory headroom, then enables general text only. Windows installation and real candidate validation remain pending for this implementation.
+
+## Fast local mode (indexed context, parallel slots, speculative decoding)
+
+These are opt-in through `setup/gateway-config.json` and the launcher, and are tuned for one integrated GPU with large unified memory.
+
+- **Indexed context window instead of compaction** (`contextWindow` + `sessionMemory`): Codex sends full history; per conversation (`prompt_cache_key`) the gateway forwards the setup items and first task, a lecore recall block, and the recent tail within `budgetTokens`. The cut point moves only in large steps, so the forwarded prefix stays byte-identical between rebases and llama.cpp's prompt cache keeps hitting. Older turns are indexed (BM25 + normalized query, RRF) instead of discarded. With it enabled the exported catalog advertises 1M-token windows so Codex never compacts.
+- **Conversation affinity**: later turns of a conversation return to the instance holding its cached prefix; new conversations go to the least busy loaded model.
+- **Unified KV parallel slots**: one shared KV pool per instance (`--kv-unified --no-cache-idle-slots`), one slot per 32K tokens of pool, so concurrent conversations keep their caches without extra memory.
+- **Speculative decoding**: `--spec-type ngram-mod` for chat models (measured +86% on code rewrites, +22% freeform for dense models, neutral on MoE); a model that fails to start with it is retried without it.
+- **Discovery** validates new GGUFs at native context with text, tool-call and (with a pinned projector) image smoke tests; tool requests only route to tool-verified models.
+- **Launcher**: close Codex, then run `Start Local Codex.cmd` (or `start-local-codex.ps1`). It restarts an idle gateway, unloads idle AUTO-loaded models, validates new downloads, exports the live catalog, and starts Codex.

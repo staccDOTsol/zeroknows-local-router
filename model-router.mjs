@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {GatewayError,localURL} from './gateway-runtime.mjs';
-import {validateRoutingPolicy,eligibility,compatibilityReasons,memoryEstimate,scoreCandidates} from './routing-policy.mjs';
+import {validateRoutingPolicy,eligibility,compatibilityReasons,memoryEstimate,scoreCandidates,parallelSlots,HEADROOM_BYTES,SERVE_FLOOR_BYTES} from './routing-policy.mjs';
 const GiB=1024**3;
 const root=fileURLToPath(new URL('.',import.meta.url));
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -36,18 +36,18 @@ export function classify(body,path){
  }
  walk(body.input??body.messages??'', 'input');walk(body.instructions,'text');walk(body.tools);walk(body.tool_choice);walk(body.response_format);walk(body.text?.format);
  if(unsupported)throw new GatewayError(415,'Audio, video and file inputs are not supported by these local backends');
- if(images>4)throw new GatewayError(413,'At most four images per request');
- const output=body.max_output_tokens??body.max_completion_tokens??body.max_tokens??2048;
- if(!Number.isInteger(output)||output<1||output>131072)throw new GatewayError(400,'Output token limit must be an integer from 1 to 131072');
+  const output=body.max_output_tokens??body.max_completion_tokens??body.max_tokens??2048;
+ if(!Number.isInteger(output)||output<1||output>10485760)throw new GatewayError(400,'Output token limit must be an integer from 1 to 10485760');
  const embedding=path==='/v1/embeddings';
  if(embedding&&(!(typeof body.input==='string'||Array.isArray(body.input)&&body.input.every(x=>typeof x==='string'))||body.encoding_format&&body.encoding_format!=='float'))throw new GatewayError(400,'Embeddings require text input and float output encoding');
  if(embedding&&images)throw new GatewayError(415,'This embedding model accepts text only');
- // One UTF-8 byte per token plus framing is deliberately conservative. No input is trimmed.
- const inputTokens=bytes+512+images*16384,outputTokens=embedding?0:output,tokens=inputTokens+outputTokens;
+ // ~3 serialized JSON bytes per token (measured Codex traffic is ~3.8) plus framing. No input is trimmed;
+ // a backend context overflow still fails over before output via exceed_context_size_error.
+ const inputTokens=Math.ceil(bytes/3)+512+images*16384,outputTokens=embedding?0:output,tokens=inputTokens+outputTokens;
  const task=embedding?'embedding':images?'vision':/```|\b(code|coding|debug|function|typescript|python|javascript|compile|repository|refactor|sql)\b/i.test(text)?'coding':/\b(reason|prove|math|calculate|analyse|analyze|solve)\b/i.test(text)?'reasoning':'general';
  const format=body.response_format?.type??body.text?.format?.type;
  const requirements=[embedding?'embedding':'text',...(images?['vision']:[]),...(tools||body.tools?.length?['tools']:[]),...(['json_object','json_schema'].includes(format)?['json']:[])];
- return {task,tokens,inputTokens,outputTokens,images,requirements,estimate:'conservative serialized UTF-8 bytes + framing + output + image allowance'};
+ return {task,tokens,inputTokens,outputTokens,images,requirements,estimate:'serialized UTF-8 bytes/3 + framing + output + image allowance'};
 }
 
 export function readRegistry(path){
@@ -58,7 +58,7 @@ export function validateRegistry(registry){
  if(!Array.isArray(registry.models)||!registry.models.length||registry.models.length>32)throw Error('Configure 1..32 local models');
  const ids=new Set(),ports=new Set();
  for(const m of registry.models){
-  if(!/^[a-z0-9][a-z0-9-]+$/.test(m.id)||ids.has(m.id))throw Error('Invalid/duplicate model id');ids.add(m.id);
+  if(!/^[a-z0-9](?:[a-z0-9-]|\.(?!\.))+$/.test(m.id)||ids.has(m.id))throw Error('Invalid/duplicate model id');ids.add(m.id);
   if(!Number.isInteger(m.context)||m.context<512||m.context>m.nativeContext)throw Error('Invalid/native-exceeding context');
   if(!Number.isSafeInteger(m.nativeContext)||m.nativeContext>10485760)throw Error('Invalid native context');
   if(!Array.isArray(m.tasks)||!m.tasks.length||m.tasks.some(t=>!['general','reasoning','coding','vision','embedding'].includes(t)))throw Error('Invalid model task capabilities');
@@ -88,7 +88,7 @@ export class WindowsController{
   const stdout=await new Promise((resolve,reject)=>{
    const child=spawn(this.powershell,args,{windowsHide:true,stdio:['ignore','pipe','pipe']});let output='',errors='',done=false;
    const finish=(error)=>{if(done)return;done=true;clearTimeout(timer);child.stdout.destroy();child.stderr.destroy();if(error)reject(error);else resolve(output);};
-   const timer=setTimeout(()=>{child.kill();finish(new GatewayError(504,'Instance controller timeout; inspect ownership records before retrying'));},660000);
+   const timer=setTimeout(()=>{child.kill();finish(new GatewayError(504,'Instance controller timeout; inspect ownership records before retrying'));},1860000);
    child.stdout.on('data',chunk=>{output+=chunk;if(output.length>2*1024*1024){child.kill();finish(new Error('Controller output limit exceeded'));}});
    child.stderr.on('data',chunk=>{if(errors.length<8192)errors+=chunk;});
    child.on('error',finish);child.on('exit',code=>setTimeout(()=>finish(code===0?null:new GatewayError(503,`Instance controller exited ${code}: ${errors}`)),25));
@@ -106,7 +106,7 @@ export class WindowsController{
 export class ModelPool{
  constructor(registry,controller,{queueMs=120000,maxQueued=8,pollMs=1000,now=()=>Date.now()}={}){
   this.registry=registry;this.controller=controller;this.queueMs=queueMs;this.maxQueued=maxQueued;this.pollMs=pollMs;this.now=now;
-  this.instances=[];this.inventory=[];this.freeBytes=0;this.pending=new Map();this.leases=new Map();this.lastUsed=new Map();this.draining=new Set();this.serial=Promise.resolve();this.refreshing=null;this.refreshed=0;this.events=[];this.loading=null;this.waiters=0;this.closed=false;
+  this.affinity=new Map();this.instances=[];this.inventory=[];this.freeBytes=0;this.pending=new Map();this.leases=new Map();this.lastUsed=new Map();this.draining=new Set();this.serial=Promise.resolve();this.refreshing=null;this.refreshed=0;this.events=[];this.loading=null;this.waiters=0;this.closed=false;
  }
  async refresh(force=false){
   if(!force&&this.refreshed&&this.now()-this.refreshed<1000)return;
@@ -133,7 +133,7 @@ export class ModelPool{
  async explain(body,path){await this.refresh();const {candidates,info,explicit,rejected}=this.candidates(body,path);return {mode:explicit?'explicit':'auto',task:info.task,estimated_tokens:info.tokens,requirements:info.requirements,rejected,candidates:scoreCandidates(this,candidates,info).map(row=>row.explanation)};}
  usable(m,requiredContext=0){return this.draining.has(m.id)?[]:this.instances.filter(i=>i.model===m.id&&i.ready&&(i.context??m.context)>=requiredContext);}
  active(i){return this.leases.get(i.key)||0;}
-  async status(){await this.refresh();return {version:2,routing_policy_version:this.registry.routingPolicy?.version??1,free_ram_gib:this.freeBytes/GiB,headroom_gib:16,loading:this.loading,queued:this.waiters,instances:this.instances.map(i=>({...i,active:this.active(i),last_used:this.lastUsed.get(i.key)||null})),models:this.registry.models.map(m=>({id:m.id,context:m.context,native_context:m.nativeContext,tasks:m.tasks,embedding_identity:m.embeddingIdentity,embedding_dimensions:m.embeddingDimensions,ready:!!this.inventory.find(x=>x.id===m.id)?.ready,compatibility:m.routing?.compatibility?.status||'legacy_operator_configured',automatic_routing:!compatibilityReasons(m,this.registry,{automatic:true}).length,routing_blockers:compatibilityReasons(m,this.registry),quality:m.routing?.evaluations?.length?'recorded_requires_task_match':'unverified',required_gib:this.required(m)/GiB})),events:this.events};}
+  async status(){await this.refresh();return {version:2,routing_policy_version:this.registry.routingPolicy?.version??1,free_ram_gib:this.freeBytes/GiB,headroom_gib:HEADROOM_BYTES/GiB,loading:this.loading,queued:this.waiters,instances:this.instances.map(i=>({...i,active:this.active(i),last_used:this.lastUsed.get(i.key)||null})),models:this.registry.models.map(m=>({id:m.id,context:m.context,native_context:m.nativeContext,tasks:m.tasks,embedding_identity:m.embeddingIdentity,embedding_dimensions:m.embeddingDimensions,ready:!!this.inventory.find(x=>x.id===m.id)?.ready,compatibility:m.routing?.compatibility?.status||'legacy_operator_configured',automatic_routing:!compatibilityReasons(m,this.registry,{automatic:true}).length,routing_blockers:compatibilityReasons(m,this.registry),quality:m.routing?.evaluations?.length?'recorded_requires_task_match':'unverified',required_gib:this.required(m)/GiB})),events:this.events};}
  async ensure(m,automatic,replicate=false,signal,requiredContext=0){
   return this.exclusive(async()=>{
    const blockers=compatibilityReasons(m,this.registry);if(blockers.length)throw new GatewayError(422,`${m.id}: ${blockers.join(', ')}`);
@@ -146,8 +146,9 @@ export class ModelPool{
    const replica=m.ports.findIndex((_,idx)=>!used.has(idx));
    if(replica<0)return null;
    if(!this.inventory.find(x=>x.id===m.id)?.ready)throw new GatewayError(503,`${m.id}: local files missing or unverified`);
-   let slots=(this.pending.get(m.id)||0)>1?2:1;
-   if(this.required(m,slots)>this.freeBytes)slots=1;
+   // Parallel slots share one unified KV pool, so concurrent conversations keep their own
+   // cached state without extra memory; the count comes from parallelSlots().
+   const slots=parallelSlots(m);
    if(this.required(m,slots)>this.freeBytes&&automatic){
     const idle=this.instances.filter(i=>i.automatic&&this.active(i)===0&&i.model!==m.id&&this.now()-(this.lastUsed.get(i.key)||this.now())>this.registry.idleEvictMs).sort((a,b)=>(this.lastUsed.get(a.key)||0)-(this.lastUsed.get(b.key)||0));
     for(const instance of idle){
@@ -156,7 +157,7 @@ export class ModelPool{
      if(this.required(m,slots)<=this.freeBytes)break;
     }
    }
-   if(this.required(m,slots)>this.freeBytes)throw new GatewayError(507,`${m.id}: estimated ${ (this.required(m,slots)/GiB).toFixed(2)} GiB free required including 16 GiB headroom; available ${(this.freeBytes/GiB).toFixed(2)} GiB`);
+   if(this.required(m,slots)>this.freeBytes)throw new GatewayError(507,`${m.id}: estimated ${ (this.required(m,slots)/GiB).toFixed(2)} GiB free required including ${HEADROOM_BYTES/GiB} GiB headroom; available ${(this.freeBytes/GiB).toFixed(2)} GiB`);
    this.loading={model:m.id,replica,slots};this.event('loading',this.loading);
    try{if(signal?.aborted)throw signal.reason;const instance=await this.controller.start(m,replica,slots,automatic);this.lastUsed.set(instance.key,this.now());await this.refresh(true);this.event('ready',{model:m.id,instance:instance.key});return instance;}
    finally{this.loading=null;}
@@ -164,6 +165,7 @@ export class ModelPool{
  }
  async acquire(body,path,signal,exclude=[]){
   const {candidates,info,explicit,rejected}=this.candidates(body,path,exclude);
+  const sessionKey=typeof body.prompt_cache_key==='string'&&body.prompt_cache_key?body.prompt_cache_key:null;
   if(this.waiters>=this.maxQueued)throw new GatewayError(429,'Local model admission queue is full');
   this.waiters++;for(const m of candidates)this.pending.set(m.id,(this.pending.get(m.id)||0)+1);
   const until=this.now()+this.queueMs;let last='No eligible instance has free capacity';
@@ -172,10 +174,16 @@ export class ModelPool{
     if(signal?.aborted)throw signal.reason;await bounded(this.refresh(),signal,until-this.now());
     if(signal?.aborted)throw signal.reason;
     const ranked=scoreCandidates(this,candidates,info);
+    // Conversation affinity: later turns of a conversation (Codex prompt_cache_key) go back
+    // to the instance holding its cached prefix; moving it would re-read the whole prompt.
+    const sticky=sessionKey?this.affinity.get(sessionKey):null;
+    if(sticky){const at=ranked.findIndex(row=>row.model.id===sticky.model);if(at>0)ranked.unshift(...ranked.splice(at,1));}
     for(const {model:m,explanation} of ranked){
-     const instance=this.usable(m).find(i=>this.active(i)<i.slots&&(i.context??m.context)>=info.tokens);
-     if(instance&&this.freeBytes>=16*GiB){
+     const open=this.usable(m).filter(i=>this.active(i)<i.slots&&(i.context??m.context)>=info.tokens);
+     const instance=(sticky&&sticky.model===m.id&&open.find(i=>i.key===sticky.instance))||open[0];
+     if(instance&&this.freeBytes>=SERVE_FLOOR_BYTES){
       this.leases.set(instance.key,this.active(instance)+1);this.lastUsed.set(instance.key,this.now());let released=false;
+      if(sessionKey){this.affinity.delete(sessionKey);this.affinity.set(sessionKey,{model:m.id,instance:instance.key});if(this.affinity.size>4096)this.affinity.delete(this.affinity.keys().next().value);}
       this.event('route',{model:m.id,instance:instance.key,task:info.task,mode:explicit?'explicit':'auto',selection:explanation,alternatives:ranked.filter(row=>row.model.id!==m.id).map(row=>row.explanation),rejected});
       return {model:m.id,instance,selection:explanation,embeddingIdentity:m.embeddingIdentity,embeddingDimensions:m.embeddingDimensions,backend:{url:localURL(`http://127.0.0.1:${instance.port}`),protocol:'responses'},info,release:()=>{if(!released){released=true;this.leases.set(instance.key,Math.max(0,this.active(instance)-1));this.lastUsed.set(instance.key,this.now());}}};
      }

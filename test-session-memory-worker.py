@@ -25,6 +25,10 @@ class StoreTests(unittest.TestCase):
             reopened.db.close()
 
     def test_document_count_quota_rolls_back_batch(self):
+        # Production quotas are large; pin a small one so the rollback path is exercised.
+        original_limit = worker.MAX_DOCUMENTS
+        worker.MAX_DOCUMENTS = 256
+        self.addCleanup(setattr, worker, 'MAX_DOCUMENTS', original_limit)
         with tempfile.TemporaryDirectory() as directory:
             store = worker.Store(directory)
             session = store.run({'action': 'bind'})['session']

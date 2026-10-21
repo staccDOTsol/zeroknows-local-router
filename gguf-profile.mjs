@@ -13,13 +13,16 @@ const integer = (n, name, max = 10485760) => {
 };
 
 export function profileFromMetadata(metadata, {context = 4096} = {}) {
-  integer(context, 'requested context', 4096);
+  integer(context, 'requested context', 10485760);
   if (context < 512) throw Error('GGUF context must be at least 512');
   const architecture = metadata['general.architecture'];
-  if (!['llama', 'qwen2', 'qwen3', 'gemma3'].includes(architecture)) {
+  // muse-glimmer: scalar GQA with sliding-window layers; charging every layer at full
+  // context over-estimates KV, which is the safe direction for admission.
+  if (!['llama', 'qwen2', 'qwen3', 'gemma3', 'deci', 'qwen35', 'muse-glimmer'].includes(architecture)) {
     throw Error(`Unsupported GGUF attention architecture: ${architecture}`);
   }
   const get = suffix => metadata[`${architecture}.${suffix}`];
+  if (architecture === 'deci' || architecture === 'qwen35') return profileLayered(architecture, get, context);
   // Hybrid/recurrent and per-layer array layouts need their own accounting.
   if (Object.keys(metadata).some(key => /(?:^|\.)(?:ssm|recurrent)(?:\.|$)/.test(key))) throw Error('Unsupported GGUF recurrent accounting');
   const nativeContext = integer(get('context_length'), 'native context');
@@ -38,6 +41,50 @@ export function profileFromMetadata(metadata, {context = 4096} = {}) {
   if (nativeContext < 512) throw Error('Unsupported GGUF native context');
   return {architecture, nativeContext, context: Math.min(context, nativeContext), kvBytesPerToken,
     fixedCacheMiB: 0, promptCacheGiB: 1};
+}
+
+// Layer-varying layouts. Only layers that keep a per-token KV cache are charged per
+// token; every unknown or inconsistent field fails closed.
+function profileLayered(architecture, get, context) {
+  const nativeContext = integer(get('context_length'), 'native context');
+  const layers = integer(get('block_count'), 'layer count', 1024);
+  const keyLength = integer(get('attention.key_length'), 'key length', 65536);
+  const valueLength = integer(get('attention.value_length'), 'value length', 65536);
+  const perLayer = (name, values) => {
+    if (!Array.isArray(values) || values.length !== layers || values.some(v => !Number.isSafeInteger(v) || v < 0 || v > 65536)) throw Error(`Unsupported GGUF per-layer ${name}`);
+    return values;
+  };
+  let kvHeadLayers, fixedCacheMiB = 0;
+  if (architecture === 'deci') {
+    // Nemotron/DeciLM: per-layer KV head counts; layers with 0 KV heads have no attention cache.
+    const kv = get('attention.head_count_kv');
+    kvHeadLayers = Array.isArray(kv) ? perLayer('KV heads', kv) : Array(layers).fill(integer(kv, 'KV heads', 65536));
+  } else {
+    // Qwen3.5 hybrid: only full-attention layers keep KV; recurrent layers hold fixed state.
+    const kvHeads = integer(get('attention.head_count_kv'), 'KV heads', 65536);
+    const flags = get('attention.recurrent_layers');
+    let recurrent;
+    if (Array.isArray(flags)) {
+      if (flags.length !== layers || flags.some(v => typeof v !== 'boolean')) throw Error('Unsupported GGUF recurrent layer flags');
+      recurrent = flags;
+    } else {
+      const interval = integer(get('full_attention_interval'), 'full attention interval', 1024);
+      recurrent = Array.from({length: layers}, (_, i) => (i + 1) % interval !== 0);
+    }
+    kvHeadLayers = recurrent.map(isRecurrent => isRecurrent ? 0 : kvHeads);
+    const inner = integer(get('ssm.inner_size'), 'SSM inner size', 1048576);
+    const state = integer(get('ssm.state_size'), 'SSM state size', 65536);
+    const groups = integer(get('ssm.group_count'), 'SSM group count', 65536);
+    const kernel = integer(get('ssm.conv_kernel'), 'SSM conv kernel', 64);
+    const stateBytes = recurrent.filter(Boolean).length * (inner * state + (kernel - 1) * (inner + 2 * groups * state)) * 4;
+    // Two slots of FP32 recurrent state, doubled again as margin, plus 256 MiB.
+    fixedCacheMiB = Math.ceil(stateBytes * 4 / 1024 ** 2) + 256;
+  }
+  const kvHeadSum = kvHeadLayers.reduce((sum, heads) => sum + heads, 0);
+  if (!kvHeadSum) throw Error('GGUF layout has no attention KV layers');
+  const kvBytesPerToken = integer(kvHeadSum * (keyLength + valueLength) * 2, 'FP16 KV bytes', Number.MAX_SAFE_INTEGER);
+  if (nativeContext < 512) throw Error('Unsupported GGUF native context');
+  return {architecture, nativeContext, context: Math.min(context, nativeContext), kvBytesPerToken, fixedCacheMiB, promptCacheGiB: 1};
 }
 
 export async function readGGUFProfile(path, options = {}) {
@@ -77,9 +124,12 @@ export async function readGGUFProfile(path, options = {}) {
       if (type === 9) {
         const itemType = await u32(), count = await u64();
         if (count > MAX_ITEMS || itemType === 9 || (!widths.has(itemType) && itemType !== 8)) throw Error('Unsupported GGUF array');
-        if (itemType === 8) { for (let i = 0; i < count; i++) await string(false); }
-        else advance(count * widths.get(itemType));
-        return keep ? [] : undefined; // Arrays never masquerade as scalar layout fields.
+        if (itemType === 8) { for (let i = 0; i < count; i++) await string(false); return keep ? [] : undefined; }
+        // Per-layer layout arrays (deci head counts, qwen35 recurrent flags) are kept as
+        // real arrays; they are only accepted by architectures with explicit array accounting.
+        if (keep && count <= 4096) { const items = []; for (let i = 0; i < count; i++) items.push(await value(itemType, true)); return items; }
+        advance(count * widths.get(itemType));
+        return keep ? [] : undefined;
       }
       if (!widths.has(type)) throw Error(`Unknown GGUF metadata type ${type}`);
       const width = widths.get(type);
@@ -104,7 +154,7 @@ export async function readGGUFProfile(path, options = {}) {
       const key = await string(true);
       if (keys.has(key)) throw Error('Duplicate GGUF metadata key');
       keys.add(key);
-      const keep = key === 'general.architecture' || /\.(?:context_length|block_count|embedding_length|attention\.(?:head_count|head_count_kv|key_length|value_length))$/.test(key)
+      const keep = key === 'general.architecture' || /\.(?:context_length|block_count|embedding_length|full_attention_interval|attention\.(?:head_count|head_count_kv|key_length|value_length))$/.test(key)
         || /(?:^|\.)(?:ssm|recurrent)(?:\.|$)/.test(key);
       const parsed = await value(await u32(), keep);
       if (keep) metadata[key] = parsed;
