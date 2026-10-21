@@ -51,7 +51,9 @@ export function classify(body,path){
 }
 
 export function readRegistry(path){
- const registry=JSON.parse(readFileSync(path,'utf8').replace(/^\uFEFF/,''));
+ return validateRegistry(JSON.parse(readFileSync(path,'utf8').replace(/^\uFEFF/,'')));
+}
+export function validateRegistry(registry){
  if(registry.memoryMode!=='uma'||typeof registry.serverPath!=='string'||!Number.isInteger(registry.idleEvictMs)||registry.idleEvictMs<60000)throw Error('Configure a UMA runtime and an idle eviction interval of at least 60 seconds');
  if(!Array.isArray(registry.models)||!registry.models.length||registry.models.length>32)throw Error('Configure 1..32 local models');
  const ids=new Set(),ports=new Set();

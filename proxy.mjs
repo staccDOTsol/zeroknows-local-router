@@ -8,6 +8,7 @@ import {freemem} from 'node:os';
 import {adaptRequest} from './tool-adapter.mjs';
 import {GatewayError,Limiter,localURL,readJSON,sseFrames,frameData,SSEChannel,superviseSSE} from './gateway-runtime.mjs';
 import {toChat,fromChat,chatEvents} from './actual-adapter.mjs';
+import {startDiscovery} from './startup-discovery.mjs';
 import {ModelPool,WindowsController,readRegistry} from './model-router.mjs';
 import {SessionMemory,memoryConfiguration,memoryAccess,sessionHeader,withSessionEvidence,assertMemoryPromptBudget} from './session-memory.mjs';
 import {buildCodexCatalog,readCatalogTemplate} from './model-catalog.mjs';
@@ -90,7 +91,7 @@ const server=http.createServer(async(req,res)=>{
   }
   if(!allowed.has(path))return fail(res,status=404,'Unsupported endpoint');
   if(!['GET','POST'].includes(req.method))return fail(res,status=405,'Unsupported method');
-  if(path==='/health'&&config.pool)return json(res,status=200,{status:'ok',scope:'gateway',router:await config.pool.status()});
+  if(path==='/health'&&config.pool)return json(res,status=200,{status:'ok',scope:'gateway',router:{...await config.pool.status(),startup_discovery:config.pool.discovery??null}});
   if(path==='/v1/models'&&req.method==='GET'&&config.pool){const state=await config.pool.status();return json(res,status=200,{object:'list',data:[{id:'auto',object:'model',owned_by:'local',routing:'capability'},...state.models.filter(m=>m.ready).map(m=>({id:m.id,object:'model',owned_by:'local',context:m.context,tasks:m.tasks}))]});}
   if(path.startsWith('/memory/')){
    if(!memory)return fail(res,status=404,'Session memory is not enabled');
@@ -249,6 +250,7 @@ return server;
 if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){
  const config=configuration(process.argv[2]);
  createGateway(config).listen(config.port,'127.0.0.1',()=>{
+  if(config.pool&&config.startupDiscovery)startDiscovery(config.pool,config.startupDiscovery,{root});
   writeFileSync(root+'logs/proxy.pid',String(process.pid));
   console.log(`Local model gateway PID ${process.pid}: http://127.0.0.1:${config.port}/v1`);
  });
