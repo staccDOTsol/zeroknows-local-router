@@ -1,0 +1,13 @@
+logs/
+models/
+runtime/
+node_modules/
+setup/gateway-config.json
+setup/model-registry.json
+setup/local-model-catalog.json
+*.gguf
+*.safetensors
+*.bin
+*.exe
+*.dll
+.env*

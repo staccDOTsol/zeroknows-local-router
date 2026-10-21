@@ -1,0 +1,10 @@
+{
+  "port": 8090,
+  "requestMs": 600000,
+  "queueMs": 300000,
+  "maxQueued": 8,
+  "minFreeMemoryGiB": 16,
+  "routeHeaderTimeoutMs": 120000,
+  "registry": "setup/model-registry.json",
+  "powershell": "pwsh"
+}

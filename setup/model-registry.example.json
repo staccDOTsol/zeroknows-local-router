@@ -1,0 +1,39 @@
+{
+  "serverPath": "runtime/llama-server.exe",
+  "memoryMode": "uma",
+  "idleEvictMs": 180000,
+  "models": [
+    {
+      "id": "local-text",
+      "ports": [
+        8085,
+        8185
+      ],
+      "context": 4096,
+      "nativeContext": 4096,
+      "kvBytesPerToken": 0,
+      "fixedCacheMiB": 0,
+      "promptCacheGiB": 1,
+      "weightBytes": 0,
+      "files": [
+        {
+          "path": "models/REPLACE-WITH-YOUR-MODEL.gguf",
+          "bytes": 0,
+          "sha256": "REPLACE-WITH-VERIFIED-SHA256",
+          "role": "model",
+          "verificationJournal": "logs/download-verified.log"
+        }
+      ],
+      "tasks": [
+        "general",
+        "reasoning",
+        "coding"
+      ],
+      "rank": {
+        "general": 0,
+        "reasoning": 0,
+        "coding": 0
+      }
+    }
+  ]
+}

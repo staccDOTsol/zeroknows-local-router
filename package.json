@@ -1,0 +1,13 @@
+{
+  "name": "zeroknows-local-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local model demand routing and bounded Windows UMA instance control",
+  "scripts": {
+    "test": "node run-tests.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
