@@ -16,3 +16,8 @@ setup/local-model-catalog.generated.json
 # Local retrieval caches
 __pycache__/
 *.py[cod]
+
+# Private local AUTO repair outputs (backups may contain credentials)
+*.auto-backup.*
+*.auto-repair.*.json
+auto-catalog.*.json
