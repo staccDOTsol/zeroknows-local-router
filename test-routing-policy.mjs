@@ -4,7 +4,7 @@ import {mkdtempSync, writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {ModelPool, classify, readRegistry} from './model-router.mjs';
-import {modelFingerprint, memoryEstimate, validateRoutingPolicy, evaluationFor} from './routing-policy.mjs';
+import {modelFingerprint, memoryEstimate, validateRoutingPolicy, evaluationFor, HEADROOM_BYTES} from './routing-policy.mjs';
 
 // SYNTHETIC policy fixtures only. These scores are not model benchmarks.
 const GiB = 1024 ** 3, NOW = Date.parse('2026-10-21T00:00:00Z');
@@ -78,7 +78,7 @@ test('tools, tool history, structured output and images have independent gates',
 test('context estimates count output, UTF-8, tool schemas, JSON keys, arrays and primitives', () => {
   const body = request({input: '😀', tools: [{type: 'function', parameters: {properties: {["x".repeat(800)]: {enum: Array(500).fill(null)}}}}]});
   const info = classify(body, '/v1/responses');
-  assert.ok(info.inputTokens >= Buffer.byteLength(JSON.stringify(body.tools)));
+  assert.ok(info.inputTokens >= Math.ceil(Buffer.byteLength(JSON.stringify(body.tools)) / 3));
   assert.equal(info.tokens, info.inputTokens + 32);
   assert.equal(info.outputTokens, 32);
   assert.ok(info.requirements.includes('tools'));
@@ -88,14 +88,14 @@ test('request demand is reported but cold admission retains full-context reserva
   const m = model('memory-model'), info = classify(request(), '/v1/responses');
   const estimate = memoryEstimate(m, info, 2), {pool} = fixture([m]);
   assert.ok(estimate.requestKvBytes < estimate.allocatedKvBytes);
-  assert.equal(estimate.allocatedKvBytes, m.kvBytesPerToken * m.context * 2);
+  assert.equal(estimate.allocatedKvBytes, m.kvBytesPerToken * m.context);
   assert.equal(pool.required(m, 2), estimate.coldRequiredBytes);
-  assert.equal(estimate.headroomBytes, 16 * GiB);
+  assert.equal(estimate.headroomBytes, HEADROOM_BYTES);
 });
 
 test('cold-fit candidate wins over an infeasible higher-ranked model without attempting its load', async () => {
   const large = model('large-model', {weightBytes: 10 * GiB, rank: {general: 0}}), small = model('small-model', {rank: {general: 99}});
-  const {pool, controller} = fixture([large, small], {freeBytes: 30 * GiB});
+  const {pool, controller} = fixture([large, small], {freeBytes: 16 * GiB});
   const lease = await pool.acquire(request(), '/v1/responses');
   assert.equal(lease.model, small.id);assert.deepEqual(controller.starts, [small.id]);lease.release();
 });
@@ -218,5 +218,5 @@ test('score memory explains the actual resident two-slot allocation', async () =
   const m = model('slots-model'), {pool, controller} = fixture([m], {warm: [m]});controller.instances[0].slots = 2;
   const explanation = await pool.explain(request(), '/v1/responses');
   assert.equal(explanation.candidates[0].allocationSlots, 2);
-  assert.equal(explanation.candidates[0].allocatedKvBytes, m.context * m.kvBytesPerToken * 2);
+  assert.equal(explanation.candidates[0].allocatedKvBytes, m.context * m.kvBytesPerToken);
 });

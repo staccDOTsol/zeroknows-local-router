@@ -23,12 +23,12 @@ export class Limiter {
  }
  release(){let released=false;return ()=>{if(released)return;released=true;const next=this.queue.shift();if(next){next.cleanup();next.resolve(this.release());}else this.active--;};}
 }
-export async function readJSON(response,maxBytes=32*1024*1024){
+export async function readJSON(response,maxBytes=512*1024*1024){
  let bytes=0;const chunks=[];
  for await(const chunk of response.body){bytes+=chunk.length;if(bytes>maxBytes)throw new GatewayError(502,'Backend response exceeds buffer limit');chunks.push(chunk);}
  try{return JSON.parse(Buffer.concat(chunks));}catch{throw new GatewayError(502,'Backend returned invalid JSON');}
 }
-export async function* sseFrames(stream,maxFrameBytes=1024*1024){
+export async function* sseFrames(stream,maxFrameBytes=256*1024*1024){
  const decoder=new TextDecoder();let buffer='';
  for await(const chunk of stream){
   buffer+=typeof chunk==='string'?chunk:decoder.decode(chunk,{stream:true});

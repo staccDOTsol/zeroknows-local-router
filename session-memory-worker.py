@@ -15,13 +15,37 @@ import sys
 from collections import OrderedDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'vendor' / 'lecore'))
-from retrieval import BM25, chunk_text, topk_det
+from retrieval import BM25, chunk_text, topk_det, tokenize
+
+# Ported from openzoo-ingest/daemon/rank.py: drop instruction boilerplate from the
+# query and add joined forms of dotted/hyphenated compounds (pump.fun -> pumpfun).
+_INSTRUCTION_WORDS = frozenset('''
+list lists listing every all each any find finding found show shows tell give
+gives provide mention mentions mentioned distinct exhaustive exhaustively
+comprehensive complete completely please can could would you your me my we our
+with without context including include included detail details detailed
+explain describe summarise summarize summary about regarding concerning
+question answer please thanks thank
+what which where when who whom whose why how
+is are was were be been being do does did done has have had
+the a an of to in on for from by as at and or but if then than that this these
+those it its there here also more most some many much very just only
+'''.split())
+
+
+def normalize_query(query):
+    kept = [t for t in tokenize(query or '') if t not in _INSTRUCTION_WORDS]
+    for m in re.findall(r'[A-Za-z0-9]+(?:[.\-_][A-Za-z0-9]+)+', query or ''):
+        joined = re.sub(r'[.\-_]', '', m).lower()
+        if joined and joined not in kept:
+            kept.append(joined)
+    return ' '.join(kept)
 
 MAX_DOCUMENT_BYTES = 65536
-MAX_SESSION_BYTES = 4 * 1024 * 1024
-MAX_TOTAL_BYTES = 32 * 1024 * 1024
-MAX_DOCUMENTS = 256
-MAX_SESSIONS = 128
+MAX_SESSION_BYTES = 1024 * 1024 * 1024
+MAX_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
+MAX_DOCUMENTS = 1000000
+MAX_SESSIONS = 1000000
 MAX_LINE_BYTES = 300000
 
 
@@ -142,7 +166,7 @@ class Store:
             return result
         query, limit = command.get('query'), command.get('limit', 4)
         check(isinstance(query, str) and len(query.encode('utf-8')) <= 8192, 'Recall query must be text of at most 8 KiB')
-        check(type(limit) is int and 1 <= limit <= 8, 'Recall limit must be 1..8')
+        check(type(limit) is int and 1 <= limit <= 32, 'Recall limit must be 1..32')
         cached = self.cache.get(key)
         if cached is None or cached[0] != revision:
             chunks = []
@@ -156,9 +180,23 @@ class Store:
         while len(self.cache) > 4:
             self.cache.popitem(last=False)
         _, chunks, index = cached
-        scores = index.scores(query)
-        matches = [{**chunks[int(i)], 'score': float(scores[i])} for i in topk_det(scores, limit) if scores[i] > 0]
-        return {'revision': revision, 'matches': matches, 'retrieval': 'lecore-bm25-lexical'}
+        # Raw and normalized query variants, each over-fetched with derivational
+        # expansion, merged by reciprocal rank fusion (k=60), as in openzoo-ingest.
+        variants = [query]
+        normalized = normalize_query(query)
+        if normalized and normalized != ' '.join(tokenize(query)):
+            variants.append(normalized)
+        fused, best = {}, {}
+        fetch = max(limit, min(len(chunks), limit * 8))
+        for variant in variants:
+            scores = index.scores(variant, expand=True)
+            for rank, i in enumerate(i for i in topk_det(scores, fetch) if scores[i] > 0):
+                i = int(i)
+                fused[i] = fused.get(i, 0.0) + 1.0 / (60 + rank + 1)
+                best[i] = max(best.get(i, 0.0), float(scores[i]))
+        order = sorted(fused, key=lambda i: (-fused[i], i))[:limit]
+        matches = [{**chunks[i], 'score': best[i], 'rrf': fused[i]} for i in order]
+        return {'revision': revision, 'matches': matches, 'retrieval': 'lecore-bm25-rrf'}
 
 
 def main():

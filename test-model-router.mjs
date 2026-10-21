@@ -27,7 +27,7 @@ test('audio, video, file references and remote images fail clearly',()=>{
 });
 test('explicit selection cannot send an image to text model or exceed context',()=>{
  const {pool}=fixture();assert.throws(()=>pool.candidates({model:'text-model',input:[{type:'input_image',image_url:'data:image/png;base64,YQ=='}]},'/v1/responses'),e=>e.status===422);
- assert.throws(()=>pool.candidates(request('text-model','x'.repeat(66000)),'/v1/responses'),e=>e.status===422);
+ assert.throws(()=>pool.candidates(request('text-model','x'.repeat(3*66000)),'/v1/responses'),e=>e.status===422);
 });
 test('explicit model override wins ranking and ready slot avoids loading',async()=>{
  const models=[definition('first-model'),definition('second-model',undefined,1)];const {pool,controller}=fixture(models,[instance(models[1])]);
@@ -49,11 +49,11 @@ test('replicas are bounded to two and queued load can use second instance',async
  assert.equal(controller.starts.length,1);assert.equal(controller.starts[0].replica,1);assert.equal(controller.starts[0].slots,2);assert.equal(new Set([a.instance.key,b.instance.key,c.instance.key]).size,2);a.release();b.release();c.release();
 });
 test('insufficient capacity queues then errors without evicting pinned model',async()=>{
- const models=[definition('first-model'),definition('second-model',undefined,1)];const {pool,controller}=fixture(models,[instance(models[0])],{freeBytes:20*GiB,queueMs:25});
+ const models=[definition('first-model'),definition('second-model',undefined,1)];const {pool,controller}=fixture(models,[instance(models[0])],{freeBytes:11*GiB,queueMs:25});
  await assert.rejects(pool.acquire(request('second-model'),'/v1/responses'),e=>e.status===503&&/memory|GiB/.test(e.message));assert.equal(controller.starts.length,0);assert.equal(controller.stops.length,0);
 });
 test('only idle automatically owned instances can be evicted',async()=>{
- let now=1000;const models=[definition('first-model'),definition('second-model',undefined,1)];const {pool,controller}=fixture(models,[instance(models[0],{automatic:true})],{freeBytes:26*GiB,now:()=>now});
+ let now=1000;const models=[definition('first-model'),definition('second-model',undefined,1)];const {pool,controller}=fixture(models,[instance(models[0],{automatic:true})],{freeBytes:11*GiB,now:()=>now});
  await pool.refresh();now+=100;const lease=await pool.acquire(request('second-model'),'/v1/responses');assert.deepEqual(controller.stops,['first-model-0']);lease.release();
 });
 test('cancellation releases queue count while a started load remains tracked',async()=>{

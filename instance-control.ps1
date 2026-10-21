@@ -3,7 +3,7 @@ param(
  [string]$Registry=(Join-Path $PSScriptRoot 'setup/model-registry.json'),
  [string]$Model,
  [ValidateRange(0,1)][int]$Replica=0,
- [ValidateRange(1,2)][int]$Slots=1,
+ [ValidateRange(1,1024)][int]$Slots=1,
  [switch]$Automatic
 )
 $ErrorActionPreference='Stop'
@@ -70,29 +70,44 @@ try{
  $memory=Get-CimInstance Win32_OperatingSystem
  $available=[long]$memory.FreePhysicalMemory*1KB
  $weightBytes=[long](($definition.files|Measure-Object bytes -Sum).Sum)
- $required=$weightBytes+[long]$definition.kvBytesPerToken*[long]$definition.context*$Slots+[long]$definition.fixedCacheMiB*1MB+([long]$definition.promptCacheGiB+8+16)*1GB
- if($available -lt $required){@{error=("Insufficient memory for $Model with $Slots slots: need {0:N2} GiB free including 16 GiB headroom, available {1:N2} GiB" -f ($required/1GB),($available/1GB));status=507}|ConvertTo-Json -Compress;return}
+ # One unified KV pool of the configured context is shared by all parallel slots.
+ $required=$weightBytes+[long]$definition.kvBytesPerToken*[long]$definition.context+[long]$definition.fixedCacheMiB*1MB+([long]$definition.promptCacheGiB+3+6)*1GB
+ if($available -lt $required){@{error=("Insufficient memory for $Model with $Slots slots: need {0:N2} GiB free including 6 GiB headroom, available {1:N2} GiB" -f ($required/1GB),($available/1GB));status=507}|ConvertTo-Json -Compress;return}
  # This local configuration is UMA. Never add GPU and system RAM budgets together.
  if($registryData.memoryMode -ne 'uma'){throw 'Automatic GPU admission requires an explicitly configured UMA memory budget; discrete VRAM admission is not implemented'}
  $main=$definition.files|Where-Object role -eq 'model'|Select-Object -First 1
  $projector=$definition.files|Where-Object role -eq 'projector'|Select-Object -First 1
- $argsList=@('-m',('"'+(Resolve-LocalPath $main.path)+'"'),'--alias',$Model,'--host','127.0.0.1','--port',"$port",'-ngl','99','-c',"$([long]$definition.context*$Slots)",'-np',"$Slots",'--cache-ram',"$([int]$definition.promptCacheGiB*1024)",'--offline','--no-webui','--slots','--no-context-shift','--cors-origins','localhost','-lv','4')
+ $argsList=@('-m',('"'+(Resolve-LocalPath $main.path)+'"'),'--alias',$Model,'--host','127.0.0.1','--port',"$port",'-ngl','99','-c',"$([long]$definition.context)",'-np',"$Slots",'--kv-unified','--no-cache-idle-slots','--cache-ram',"$([int]$definition.promptCacheGiB*1024)",'--offline','--no-webui','--slots','--no-context-shift','--cors-origins','localhost','-lv','4')
  if($projector){$argsList+=@('--mmproj',('"'+(Resolve-LocalPath $projector.path)+'"'))}
  if($definition.tasks -contains 'embedding'){$argsList+=@('--embedding','--pooling','last','-b','512','-ub','512')}
  if($Model -eq 'nemotron-super-vl-q4'){$argsList+=@('-b','256','-ub','128','--spec-type','none','--ctx-checkpoints','16','--checkpoint-min-step','1024')}
- if($Action -eq 'Plan'){@{model=$Model;replica=$Replica;slots=$Slots;contextPerSlot=$definition.context;totalContext=([long]$definition.context*$Slots);port=$port;requiredBytes=$required;availableBytes=$available;arguments=$argsList}|ConvertTo-Json -Compress;return}
+ # Generation slots get one token per server step, and a step waits for its whole prompt
+ # batch. Small steps keep parallel generations moving while other slots read long prompts.
+ elseif($definition.tasks -notcontains 'embedding'){$argsList+=@('-b','256','-ub','256')}
+ if($Action -eq 'Plan'){@{model=$Model;replica=$Replica;slots=$Slots;sharedContext=$definition.context;kvUnified=$true;port=$port;requiredBytes=$required;availableBytes=$available;arguments=$argsList}|ConvertTo-Json -Compress;return}
  $key="$Model-$Replica"
- $proc=Start-Process -FilePath $serverPath -ArgumentList $argsList -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $stateDir "$key-out.log") -RedirectStandardError (Join-Path $stateDir "$key-err.log")
- $identity=Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)"
- $record=[pscustomobject]@{key=$key;model=$Model;replica=$Replica;pid=$proc.Id;created=$identity.CreationDate.ToUniversalTime().ToString('o');port=$port;slots=$Slots;context=$definition.context;automatic=[bool]$Automatic;ready=$false}
- $record|ConvertTo-Json -Compress|Set-Content -LiteralPath (Join-Path $stateDir "$key.json")
- $deadline=(Get-Date).AddMinutes(10)
- do{
-  if(!(Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)){throw "Model process exited while loading; see logs/instances/$key-err.log"}
-  $current=Read-Record $definition $Replica
-  if($current.ready){$current|ConvertTo-Json -Compress;return}
-  Start-Sleep -Milliseconds 1000
- }while((Get-Date) -lt $deadline)
- throw 'Readiness timed out; process retained for inspection. No duplicate will be started.'
+ # N-gram speculative decoding drafts tokens from text already in the context (measured:
+ # +86% on code rewrites, +22% freeform for dense models, neutral for MoE). A model that
+ # cannot start with it is retried once without it; "spec": false in the registry opts out.
+ $useSpec=($Model -ne 'nemotron-super-vl-q4') -and ($definition.tasks -notcontains 'embedding') -and ($definition.spec -ne $false)
+ foreach($attempt in 0,1){
+  $withSpec=$useSpec -and $attempt -eq 0
+  if($attempt -eq 1 -and !$useSpec){break}
+  $launchArgs=if($withSpec){$argsList+@('--spec-type','ngram-mod')}else{$argsList}
+  $proc=Start-Process -FilePath $serverPath -ArgumentList $launchArgs -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $stateDir "$key-out.log") -RedirectStandardError (Join-Path $stateDir "$key-err.log")
+  $identity=Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)"
+  $record=[pscustomobject]@{key=$key;model=$Model;replica=$Replica;pid=$proc.Id;created=$identity.CreationDate.ToUniversalTime().ToString('o');port=$port;slots=$Slots;context=$definition.context;automatic=[bool]$Automatic;ready=$false;spec=$withSpec}
+  $record|ConvertTo-Json -Compress|Set-Content -LiteralPath (Join-Path $stateDir "$key.json")
+  $deadline=(Get-Date).AddMinutes(30);$exited=$false
+  do{
+   if(!(Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)){$exited=$true;break}
+   $current=Read-Record $definition $Replica
+   if($current.ready){$current|ConvertTo-Json -Compress;return}
+   Start-Sleep -Milliseconds 1000
+  }while((Get-Date) -lt $deadline)
+  if(!$exited){throw 'Readiness timed out; process retained for inspection. No duplicate will be started.'}
+  if(!$withSpec){break}
+ }
+ throw "Model process exited while loading; see logs/instances/$key-err.log"
 }catch{@{error=$_.Exception.Message;status=503}|ConvertTo-Json -Compress}
 finally{if($owned){$mutex.ReleaseMutex()};if($mutex){$mutex.Dispose()}}

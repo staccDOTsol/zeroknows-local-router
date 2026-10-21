@@ -195,3 +195,17 @@ test('official app-server prefers the explicit catalog file over an unavailable 
     '-c', 'model_providers.local_catalog_test.model_catalog_url="http://127.0.0.1:1/unavailable"',
   ]));
 });
+
+test('windowed catalog: gateway context window means no client compaction and AUTO advertises the largest route', () => {
+  const catalog = buildCodexCatalog(definitions, {models: []}, {windowed: true});
+  const auto = catalog.models.find(model => model.slug === 'auto');
+  assert.equal(auto.context_window, 1048576);
+  assert.equal(auto.auto_compact_token_limit, 1000000);
+  for (const model of catalog.models) {
+    assert.ok(model.context_window >= 1048576);
+    assert.equal(model.multi_agent_version, 'v1');
+  }
+  const plain = buildCodexCatalog(definitions);
+  assert.equal(plain.models.find(model => model.slug === 'auto').context_window, 8192);
+  assert.equal(plain.models.find(model => model.slug === 'local-vision').auto_compact_token_limit, Math.floor(16384 * 0.8));
+});
