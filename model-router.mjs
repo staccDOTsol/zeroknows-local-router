@@ -47,7 +47,9 @@ export function classify(body,path){
  const task=embedding?'embedding':images?'vision':/```|\b(code|coding|debug|function|typescript|python|javascript|compile|repository|refactor|sql)\b/i.test(text)?'coding':/\b(reason|prove|math|calculate|analyse|analyze|solve)\b/i.test(text)?'reasoning':'general';
  const format=body.response_format?.type??body.text?.format?.type;
  const requirements=[embedding?'embedding':'text',...(images?['vision']:[]),...(tools||body.tools?.length?['tools']:[]),...(['json_object','json_schema'].includes(format)?['json']:[])];
- return {task,tokens,inputTokens,outputTokens,images,requirements,estimate:'serialized UTF-8 bytes/3 + framing + output + image allowance'};
+ // Text requests that carry tools are agent work, whatever their wording.
+ const agent=!embedding&&!images&&requirements.includes('tools');
+ return {task,agent,tokens,inputTokens,outputTokens,images,requirements,estimate:'serialized UTF-8 bytes/3 + framing + output + image allowance'};
 }
 
 export function readRegistry(path){
@@ -126,7 +128,11 @@ export class ModelPool{
    if(body.embedding_identity)candidates=candidates.filter(m=>m.embeddingIdentity===body.embedding_identity);
   }
   if(!candidates.length)throw new GatewayError(explicit?422:503,`No compatible local model for ${info.task}, estimated ${info.tokens} context tokens; input was not truncated${rejected.length?'; '+rejected.map(m=>m.id+': '+m.reasons.join(', ')).join('; '):''}`);
-  candidates.sort((a,b)=>(a.rank?.[info.task]??99)-(b.rank?.[info.task]??99));
+  // Agent work goes only to coding-capable models when any is eligible, so least-busy
+  // spreading never hands a tool loop to a small chat model that refuses or stalls.
+  if(info.agent&&!explicit){const coders=candidates.filter(m=>m.tasks.includes('coding'));if(coders.length)candidates=coders;}
+  const key=info.agent?'coding':info.task;
+  candidates.sort((a,b)=>(a.rank?.[key]??a.rank?.[info.task]??99)-(b.rank?.[key]??b.rank?.[info.task]??99));
   return {candidates,info,explicit,rejected};
  }
  required(m,slots=1){return memoryEstimate(m,{tokens:m.context},slots).coldRequiredBytes;}

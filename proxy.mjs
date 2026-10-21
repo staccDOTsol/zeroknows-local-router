@@ -10,7 +10,8 @@ import {GatewayError,Limiter,localURL,readJSON,sseFrames,frameData,SSEChannel,su
 import {toChat,fromChat,chatEvents} from './actual-adapter.mjs';
 import {startDiscovery} from './startup-discovery.mjs';
 import {ModelPool,WindowsController,readRegistry} from './model-router.mjs';
-import {ContextWindow,contextWindowConfiguration,requireMemory} from './context-window.mjs';
+import {ContextWindow,contextWindowConfiguration,requireMemory,conversationKey} from './context-window.mjs';
+import {loopGuard} from './loop-guard.mjs';
 import {SessionMemory,memoryConfiguration,memoryAccess,sessionHeader,withSessionEvidence,assertMemoryPromptBudget} from './session-memory.mjs';
 import {buildCodexCatalog,readCatalogTemplate} from './model-catalog.mjs';
 
@@ -121,7 +122,7 @@ const server=http.createServer(async(req,res)=>{
    }));
    return json(res,status=200,{object:'list',data:[...new Map(lists.flat().map(x=>[x.id,x])).values()]});
   }
-  let body,adapter,originalBody,embeddingMetadata,backend=config.chat;
+  let body,adapter,originalBody,embeddingMetadata,backend=config.chat,conversation=null;
   if(req.method==='POST'){
    let size=0;const chunks=[];
    for await(const chunk of req){size+=chunk.length;if(size>512*1024*1024)return fail(res,status=413,'Request exceeds 512 MiB');chunks.push(chunk);}
@@ -141,10 +142,14 @@ const server=http.createServer(async(req,res)=>{
     res.setHeader('x-local-memory-matches',String(prepared.matches));res.setHeader('x-local-memory-revision',String(prepared.revision));
    }
    // Indexed context window replaces client compaction: bounded prompt + lecore recall per conversation.
-   if(contextWindow&&path==='/v1/responses'&&typeof body.prompt_cache_key==='string'){
-    try{const windowed=await contextWindow.prepare(body,body.prompt_cache_key,abort.signal);body=windowed.body;res.setHeader('x-local-context',`${windowed.action};${windowed.keptItems??''}/${windowed.totalItems??''};~${windowed.estimatedTokens??''}t`);}
+   // Conversation key: the client's prompt_cache_key, else a stable hash of setup + first task.
+   conversation=['/v1/responses','/v1/chat/completions'].includes(path)?(typeof body.prompt_cache_key==='string'&&body.prompt_cache_key?body.prompt_cache_key:conversationKey(body)):null;
+   if(contextWindow&&conversation){
+    try{const windowed=await contextWindow.prepare(body,conversation,abort.signal);body=windowed.body;res.setHeader('x-local-context',`${windowed.action};${windowed.keptItems??''}/${windowed.totalItems??''};~${windowed.estimatedTokens??''}t`);}
     catch(error){if(abort.signal.aborted)throw error;res.setHeader('x-local-context','error');}
    }
+   // Loop guard: nudge a model that keeps repeating an identical tool call with an identical result.
+   if(['/v1/responses','/v1/chat/completions'].includes(path)){const guarded=loopGuard(body);if(guarded.body!==body){body=guarded.body;res.setHeader('x-local-loop-guard',String(guarded.repeats));}}
    originalBody=structuredClone(body);
    if(path==='/v1/responses'){
     if(captureTools&&(body.tools||[]).some(t=>t.name==='apply_patch'||(t.tools||[]).some(c=>c.name==='apply_patch'))){
@@ -175,6 +180,8 @@ const server=http.createServer(async(req,res)=>{
    // Admission must account for the actual expanded tool schemas/replay that
    // will be forwarded, not the smaller pre-adaptation client representation.
    const routingBody=structuredClone(body);
+   // Conversation affinity also for clients that send no prompt_cache_key (routing only; not forwarded).
+   if(!routingBody.prompt_cache_key&&conversation)routingBody.prompt_cache_key=conversation;
    if(Array.isArray(body.tools)&&body.tools.length){try{const sourceTools=(originalBody?.tools||body.tools).flatMap(t=>t.type==='namespace'?(t.tools||[]).map(c=>(t.name||t.namespace||'ns')+'.'+(c.name||c.type)):[t.name||t.function?.name||t.type]);const names=sourceTools.filter(Boolean).sort().join(',');if(names!==config.lastToolNames){config.lastToolNames=names;appendFileSync(root+'logs/tool-offers.jsonl',JSON.stringify({time:new Date().toISOString(),model,effort:body.reasoning?.effort??null,count:sourceTools.length,tools:names.split(',')})+'\n');}}catch{}}
    const requestedModel=model,excluded=[],routeErrors=[];const attempts=requestedModel==='auto'?2:1;
    for(let attempt=0;attempt<attempts;attempt++){

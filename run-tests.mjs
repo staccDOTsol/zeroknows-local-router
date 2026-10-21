@@ -3,7 +3,7 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 process.chdir(fileURLToPath(new URL('.',import.meta.url)));
 mkdirSync('logs',{recursive:true});
-for(const args of [['--test','test-routing-policy.mjs'],['--test','test-context-window.mjs'],['--test','test-streaming.mjs'],['--test','test-codex-streaming.mjs'],['--test','test-download-launcher.mjs'],['--test','test-download-models.mjs'],['--test','test-model-router.mjs'],['--test','test-model-catalog.mjs'],['--test','test-codex-auto-repair.mjs'],['--test','test-session-memory.mjs'],['test-concurrency.mjs'],['test-replay-recovery.mjs']]){
+for(const args of [['--test','test-routing-policy.mjs'],['--test','test-context-window.mjs'],['--test','test-agent-guards.mjs'],['--test','test-streaming.mjs'],['--test','test-codex-streaming.mjs'],['--test','test-download-launcher.mjs'],['--test','test-download-models.mjs'],['--test','test-model-router.mjs'],['--test','test-model-catalog.mjs'],['--test','test-codex-auto-repair.mjs'],['--test','test-session-memory.mjs'],['test-concurrency.mjs'],['test-replay-recovery.mjs']]){
  const result=spawnSync(process.execPath,args,{stdio:'inherit'});if(result.status!==0)process.exit(result.status||1);
 }
 // Retrieval tests are required, not silently skipped when Python/NumPy is missing.
