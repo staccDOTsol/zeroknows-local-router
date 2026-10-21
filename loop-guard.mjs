@@ -24,6 +24,10 @@ function toolPairs(items, chat) {
 
 const isWrite = name => /write|edit|patch|create|replace/i.test(name ?? '');
 const isRun = name => /bash|shell|exec|command|terminal|run/i.test(name ?? '');
+const isWholeFileWrite = name => /^(write|write_file|create_file)$/i.test(name ?? '');
+const filePath = args => {
+  try { const parsed = JSON.parse(args); return parsed.filePath ?? parsed.file_path ?? parsed.path ?? null; } catch { return null; }
+};
 
 export function loopGuard(body, {threshold = 3, window = 40, unverifiedWrites = 4} = {}) {
   const chat = Array.isArray(body?.messages);
@@ -41,6 +45,10 @@ export function loopGuard(body, {threshold = 3, window = 40, unverifiedWrites = 
     const shown = last.args.length > 300 ? last.args.slice(0, 300) + '...' : last.args;
     note = `LOOP WARNING from the local gateway: you have called ${last.name} with the same arguments ${repeats} times and received the identical result each time (${shown}). `
       + 'Running it again will not change the result. Read the error message carefully, change the code or input that causes it, and only then run it again; or try a different approach.';
+  } else if (isWholeFileWrite(last.name) && filePath(last.args) && pairs.slice(0, -1).some(pair => filePath(pair.args) === filePath(last.args))) {
+    // Rewriting a whole existing file to change a few lines costs a minute of generation per step.
+    note = `EDIT WARNING from the local gateway: you just rewrote all of ${filePath(last.args)}, a file you had already read or written. `
+      + 'To change an existing file, use the edit tool and replace only the lines that change; rewriting the whole file is about 20 times slower.';
   } else {
     // Local models tend to scaffold file after file without ever running anything.
     let writes = 0;
