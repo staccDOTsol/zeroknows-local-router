@@ -12,6 +12,8 @@ import {GatewayError} from './gateway-runtime.mjs';
 
 const tokens = value => Math.ceil(Buffer.byteLength(JSON.stringify(value)) / 3);
 const DOC_BYTES = 60000;
+// The memory worker rejects requests over 256 KiB; leave room for JSON framing.
+const APPEND_BYTES = 200000;
 
 function itemText(item) {
   if (!item || typeof item !== 'object') return '';
@@ -98,11 +100,20 @@ export class ContextWindow {
         while (newCut > state.cut && !safeStart(items[newCut])) newCut--;
       }
       if (newCut > state.cut) {
-        await this.index(state, items.slice(state.indexedThrough, newCut), signal);
-        state.indexedThrough = Math.max(state.indexedThrough, newCut);
         state.cut = newCut;
-        state.recall = await this.recall(state, items, signal);
         action = 'rebased';
+        // The cut always applies. If indexing or recall fails, keep the ledger alone rather
+        // than forwarding a history no model can hold.
+        try {
+          await this.index(state, items.slice(state.indexedThrough, newCut), signal);
+          state.indexedThrough = Math.max(state.indexedThrough, newCut);
+          state.recall = await this.recall(state, items, signal);
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          const ledger = workLedger(items.slice(state.headEnd, state.cut));
+          state.recall = ledger ? this.message(ledger) : null;
+          action = 'rebased-without-recall';
+        }
       }
     }
     const input = assemble();
@@ -121,9 +132,16 @@ export class ContextWindow {
       current += (current ? '\n' : '') + text;
     }
     if (current.trim()) documents.push({text: current});
-    for (let i = 0; i < documents.length; i += 32) {
-      await this.memory.command({action: 'append', session: state.memorySession, documents: documents.slice(i, i + 32)}, {signal});
+    let batch = [], size = 0;
+    for (const document of documents) {
+      const length = Buffer.byteLength(JSON.stringify(document));
+      if (batch.length && (batch.length === 32 || size + length > APPEND_BYTES)) {
+        await this.memory.command({action: 'append', session: state.memorySession, documents: batch}, {signal});
+        batch = []; size = 0;
+      }
+      batch.push(document); size += length;
     }
+    if (batch.length) await this.memory.command({action: 'append', session: state.memorySession, documents: batch}, {signal});
   }
 
   async recall(state, items, signal) {

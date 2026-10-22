@@ -59,3 +59,34 @@ test('context window configuration validates its budgets', () => {
   assert.throws(() => contextWindowConfiguration({enabled: true, budgetTokens: 4096, keepTokens: 4096}), /keepTokens/);
   assert.throws(() => contextWindowConfiguration({enabled: true, budgetTokens: 10}), /budgetTokens/);
 });
+
+test('a first cut of a multi-megabyte chat history indexes in worker-sized batches and stays in budget', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'context-window-large-'));
+  const memory = new SessionMemory(memoryConfiguration({enabled: true, python, directory}));
+  t.after(async () => { await memory.close(); rmSync(directory, {recursive: true, force: true}); });
+  const window = new ContextWindow(memory, contextWindowConfiguration({enabled: true, budgetTokens: 49152, keepTokens: 16384}));
+  const messages = [{role: 'system', content: 'You are opencode.'}, {role: 'user', content: 'Build the scanner UI.'}];
+  for (let i = 0; i < 400; i++) {
+    messages.push({role: 'assistant', content: '', tool_calls: [{id: 'k' + i, type: 'function', function: {name: 'bash', arguments: JSON.stringify({command: `node test${i}.js`})}}]});
+    messages.push({role: 'tool', tool_call_id: 'k' + i, content: `output ${i} `.repeat(i % 40 === 0 ? 5000 : 300)});
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(messages)) > 1024 * 1024);
+  const out = await window.prepare({model: 'auto', messages}, 'large', new AbortController().signal);
+  assert.equal(out.action, 'rebased');
+  assert.ok(out.estimatedTokens <= 49152, `window kept ${out.estimatedTokens} tokens`);
+  assert.match(out.body.messages[2].content, /^SESSION MEMORY/);
+});
+
+test('the window still cuts when the memory worker fails', async () => {
+  const broken = {async command() { throw Object.assign(new Error('worker down'), {status: 503}); }};
+  const window = new ContextWindow(broken, contextWindowConfiguration({enabled: true, budgetTokens: 8000, keepTokens: 4000}));
+  const messages = [{role: 'user', content: 'Build it.'}];
+  for (let i = 0; i < 200; i++) {
+    messages.push({role: 'assistant', content: '', tool_calls: [{id: 'b' + i, type: 'function', function: {name: 'write', arguments: JSON.stringify({filePath: `src/f${i}.ts`, content: 'x'.repeat(300)})}}]});
+    messages.push({role: 'tool', tool_call_id: 'b' + i, content: 'Wrote file successfully.'});
+  }
+  const out = await window.prepare({model: 'auto', messages}, 'broken', new AbortController().signal);
+  assert.equal(out.action, 'rebased-without-recall');
+  assert.ok(out.estimatedTokens <= 8000);
+  assert.match(out.body.messages[1].content, /WORK ALREADY DONE/);
+});
